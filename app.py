@@ -22,8 +22,13 @@ def save_journal(journal_data):
     try: requests.put(JSONBIN_URL, json={"data": journal_data}, headers=headers)
     except: pass
 
+# Beim Laden prüfen, ob alte Wetten das Feld "Liga" haben, sonst ergänzen
 if 'journal' not in st.session_state:
-    st.session_state.journal = load_journal()
+    loaded_data = load_journal()
+    for bet in loaded_data:
+        if "Liga" not in bet:
+            bet["Liga"] = "Unbekannt"
+    st.session_state.journal = loaded_data
 
 def poisson_prob(k, lambd):
     return (lambd**k * math.exp(-lambd)) / math.factorial(k)
@@ -116,19 +121,16 @@ tab_engine, tab_reverse, tab_journal = st.tabs(["⚙️ Engine", "🕵️ Revers
 
 # --- TAB 1: ENGINE ---
 with tab_engine:
-    # NEU: Der Modus-Schalter
     st.markdown("### 1. Daten-Eingabe (Dein Modell)")
     data_mode = st.radio("Wie möchtest du die Team-Stärke berechnen?", ["Direkte xG-Werte eingeben (Große Ligen)", "AS/DS Rechner: Ø Torschnitt (Kleine Ligen)"], horizontal=True)
     
     st.markdown("---")
-    
     if data_mode == "Direkte xG-Werte eingeben (Große Ligen)":
         c_xg1, c_xg2 = st.columns(2)
         with c_xg1: xg_home = st.number_input("Erwartete Tore Heim ($xG$)", min_value=0.1, max_value=5.0, value=1.5, step=0.1)
         with c_xg2: xg_away = st.number_input("Erwartete Tore Auswärts ($xG$)", min_value=0.1, max_value=5.0, value=1.1, step=0.1)
-    
     else:
-        st.info("Trage hier die durchschnittlichen Tore (z.B. aus Flashscore) ein. Die App generiert daraus einen unabhängigen Proxy-$xG$-Wert.")
+        st.info("Trage hier die durchschnittlichen Tore ein. Die App generiert daraus einen unabhängigen Proxy-$xG$-Wert.")
         c_as1, c_as2 = st.columns(2)
         with c_as1:
             st.markdown("**Heimteam (Zuhause)**")
@@ -139,10 +141,8 @@ with tab_engine:
             away_scored = st.number_input("Ø Tore geschossen (Ausw.)", min_value=0.0, value=1.1, step=0.1)
             away_conceded = st.number_input("Ø Tore kassiert (Ausw.)", min_value=0.0, value=1.5, step=0.1)
         
-        # AS/DS Proxy xG Berechnung (Sehr simples, aber starkes Modell für kleine Ligen)
         xg_home = (home_scored + away_conceded) / 2.0
         xg_away = (away_scored + home_conceded) / 2.0
-        
         st.success(f"🤖 **Generierte Stärke (Proxy-$xG$):** Heim **{round(xg_home, 2)}** | Auswärts **{round(xg_away, 2)}**")
 
     st.markdown("---")
@@ -175,14 +175,27 @@ with tab_engine:
     if ev > 0:
         st.success(f"✅ Positiver EV: **+{round(ev * 100, 2)}%** | Einsatz: **{round(bet_size, 2)} €**")
         with st.expander("Wette ins Journal übernehmen"):
-            match_name, market_name = st.text_input("Spiel (z.B. Team A - Team B)"), st.text_input("Tipp (z.B. Heim 1)")
+            c_j1, c_j2, c_j3 = st.columns(3)
+            # NEU: Das Feld für die Liga
+            with c_j1: league_name = st.text_input("Liga (z.B. Schweden)")
+            with c_j2: match_name = st.text_input("Spiel (z.B. Team A - Team B)")
+            with c_j3: market_name = st.text_input("Tipp (z.B. Heim 1)")
+            
             if st.button("Ins Journal eintragen (Cloud Sync)"):
-                st.session_state.journal.append({"Spiel": match_name, "Tipp": market_name, "Quote": target_odds, "Einsatz": round(bet_size, 2), "EV (%)": round(ev * 100, 2), "Status": "Offen"})
+                st.session_state.journal.append({
+                    "Liga": league_name if league_name else "Unbekannt",
+                    "Spiel": match_name, 
+                    "Tipp": market_name, 
+                    "Quote": target_odds, 
+                    "Einsatz": round(bet_size, 2), 
+                    "EV (%)": round(ev * 100, 2), 
+                    "Status": "Offen"
+                })
                 save_journal(st.session_state.journal)
                 st.rerun()
     else: st.error(f"❌ Negativer EV: **{round(ev * 100, 2)}%**. Kein Value.")
 
-# --- TAB 2 & 3 bleiben identisch wie im letzten Schritt ---
+# --- TAB 2 bleibt identisch ---
 with tab_reverse:
     st.header("🕵️ Buchmacher entschlüsseln")
     st.info("Nutze diesen Tab, um zu sehen, wie der Markt denkt. Vergleiche den Wert dann mit deinen eigenen Berechnungen aus Tab 1.")
@@ -198,6 +211,7 @@ with tab_reverse:
         c_res1.metric("Erwartete Tore HEIM ($xG$)", f"{implied_xgh}")
         c_res2.metric("Erwartete Tore AUSWÄRTS ($xG$)", f"{implied_xga}")
 
+# --- TAB 3: JOURNAL & DASHBOARD ---
 with tab_journal:
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     kpi1.metric("Start-Kapital", f"{start_bankroll:.2f} €")
@@ -222,10 +236,13 @@ with tab_journal:
                 if bet['Status'] == 'Gewonnen': temp_bankroll += bet['Einsatz'] * bet['Quote']
                 history.append(temp_bankroll)
             st.line_chart(pd.DataFrame(history, columns=["Bankroll (€)"]), height=250)
+    
     with col_analytics:
         st.subheader("🔍 Markt-Analyse")
         if len(settled_bets) > 0:
             df_settled = pd.DataFrame(settled_bets)
+            
+            # Markt-Stats
             market_stats = []
             for market in df_settled['Tipp'].unique():
                 m_bets = df_settled[df_settled['Tipp'] == market]
@@ -235,10 +252,25 @@ with tab_journal:
                 m_roi = (profit / invested * 100) if invested > 0 else 0
                 market_stats.append({"Markt": market, "Wetten": count, "Profit (€)": round(profit, 2), "ROI (%)": round(m_roi, 1)})
             st.dataframe(pd.DataFrame(market_stats).sort_values(by="Profit (€)", ascending=False), hide_index=True, use_container_width=True)
+            
+            st.markdown("---")
+            
+            # NEU: Ligen-Stats
+            st.subheader("🌍 Ligen-Analyse")
+            league_stats = []
+            for league in df_settled['Liga'].unique():
+                l_bets = df_settled[df_settled['Liga'] == league]
+                count, invested = len(l_bets), l_bets['Einsatz'].sum()
+                returned = l_bets.apply(lambda r: r['Einsatz'] * r['Quote'] if r['Status'] == 'Gewonnen' else 0, axis=1).sum()
+                profit = returned - invested
+                l_roi = (profit / invested * 100) if invested > 0 else 0
+                league_stats.append({"Liga": league, "Wetten": count, "Profit (€)": round(profit, 2), "ROI (%)": round(l_roi, 1)})
+            st.dataframe(pd.DataFrame(league_stats).sort_values(by="Profit (€)", ascending=False), hide_index=True, use_container_width=True)
 
     st.markdown("---")
     st.subheader("📋 Wett-Historie")
     if len(st.session_state.journal) > 0:
+        # Die Liga wird jetzt auch in der Haupttabelle angezeigt
         edited_journal = st.data_editor(st.session_state.journal, column_config={"Status": st.column_config.SelectboxColumn("Status", options=["Offen", "Gewonnen", "Verloren"], required=True)}, hide_index=True, use_container_width=True)
         if edited_journal != st.session_state.journal:
             st.session_state.journal = edited_journal
