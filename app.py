@@ -15,23 +15,15 @@ def load_journal():
     try:
         req = requests.get(JSONBIN_URL, headers=headers)
         if req.status_code == 200:
-            data = req.json()
-            return data.get("record", {}).get("data", [])
+            return req.json().get("record", {}).get("data", [])
         return []
-    except:
-        return []
+    except: return []
 
 def save_journal(journal_data):
-    headers = {
-        "Content-Type": "application/json",
-        "X-Master-Key": API_KEY
-    }
-    try:
-        requests.put(JSONBIN_URL, json={"data": journal_data}, headers=headers)
-    except:
-        pass
+    headers = {"Content-Type": "application/json", "X-Master-Key": API_KEY}
+    try: requests.put(JSONBIN_URL, json={"data": journal_data}, headers=headers)
+    except: pass
 
-# --- SESSION STATE (Gedächtnis aus DB laden) ---
 if 'journal' not in st.session_state:
     st.session_state.journal = load_journal()
 
@@ -75,24 +67,18 @@ def calculate_match_probabilities(xg_home, xg_away, rho):
     p1, px, p2 = prob_1 / total_prob, prob_x / total_prob, prob_2 / total_prob
     
     return {
-        "1": p1, "X": px, "2": p2,
-        "Over25": prob_over_25, "BTTS": prob_btts,
+        "1": p1, "X": px, "2": p2, "Over25": prob_over_25, "BTTS": prob_btts,
         "AH_H_minus15": prob_ah_h_minus15, "AH_H_plus15": prob_ah_h_plus15,
         "AH_A_minus15": prob_ah_a_minus15, "AH_A_plus15": prob_ah_a_plus15,
         "1X": p1 + px, "X2": p2 + px, "12": p1 + p2,
-        "DNB1": p1 / (p1 + p2) if (p1 + p2) > 0 else 0,
-        "DNB2": p2 / (p1 + p2) if (p1 + p2) > 0 else 0
+        "DNB1": p1 / (p1 + p2) if (p1 + p2) > 0 else 0, "DNB2": p2 / (p1 + p2) if (p1 + p2) > 0 else 0
     }
 
-def calculate_ev(prob, odds):
-    return (prob * odds) - 1
-
+def calculate_ev(prob, odds): return (prob * odds) - 1
 def calculate_kelly(prob, odds, fraction=0.25):
     k = (prob * (odds - 1) - (1 - prob)) / (odds - 1)
     return k * fraction if k > 0 else 0
-
-def format_odds(prob):
-    return round(1 / prob, 2) if prob > 0 else 0.0
+def format_odds(prob): return round(1 / prob, 2) if prob > 0 else 0.0
 
 def get_true_probabilities(odds_1, odds_x, odds_2):
     i1, ix, i2 = 1 / odds_1, 1 / odds_x, 1 / odds_2
@@ -107,8 +93,7 @@ def reverse_engineer_odds(true_p1, true_px, true_p2, rho):
             xgh, xga = h / 10.0, a / 10.0
             probs = calculate_match_probabilities(xgh, xga, rho)
             diff = abs(probs["1"] - true_p1) + abs(probs["X"] - true_px) + abs(probs["2"] - true_p2)
-            if diff < best_diff:
-                best_diff, best_xg_h, best_xg_a = diff, xgh, xga
+            if diff < best_diff: best_diff, best_xg_h, best_xg_a = diff, xgh, xga
     return best_xg_h, best_xg_a
 
 
@@ -152,11 +137,10 @@ with tab_engine:
     st.markdown("---")
     st.header("Value-Check & Wette einbuchen")
     col_input1, col_input2 = st.columns(2)
-    with col_input1:
-        target_prob_input = st.number_input("Modell-Wahrscheinlichkeit (%)", min_value=1.0, max_value=99.0, value=float(round(probs['1']*100, 1)), step=0.1)
-        target_prob = target_prob_input / 100.0
+    with col_input1: target_prob_input = st.number_input("Modell-Wahrscheinlichkeit (%)", min_value=1.0, max_value=99.0, value=float(round(probs['1']*100, 1)), step=0.1)
     with col_input2: target_odds = st.number_input("Buchmacher-Quote", min_value=1.01, value=2.00, step=0.05)
 
+    target_prob = target_prob_input / 100.0
     ev = calculate_ev(target_prob, target_odds)
     bet_size = current_bankroll * calculate_kelly(target_prob, target_odds, fraction=0.25)
     if bet_size > 0 and bet_size < min_bet: bet_size = min_bet
@@ -168,7 +152,7 @@ with tab_engine:
             market_name = st.text_input("Tipp (z.B. Heim 1)")
             if st.button("Ins Journal eintragen (Cloud Sync)"):
                 st.session_state.journal.append({"Spiel": match_name, "Tipp": market_name, "Quote": target_odds, "Einsatz": round(bet_size, 2), "EV (%)": round(ev * 100, 2), "Status": "Offen"})
-                save_journal(st.session_state.journal) # Speichern in DB!
+                save_journal(st.session_state.journal)
                 st.rerun()
     else: st.error(f"❌ Negativer EV: **{round(ev * 100, 2)}%**. Kein Value.")
 
@@ -179,7 +163,6 @@ with tab_reverse:
     with r_col1: b_odd1 = st.number_input("Quote 1 (Heim)", min_value=1.01, value=2.50, step=0.05)
     with r_col2: b_oddx = st.number_input("Quote X (Draw)", min_value=1.01, value=3.20, step=0.05)
     with r_col3: b_odd2 = st.number_input("Quote 2 (Auswärts)", min_value=1.01, value=2.80, step=0.05)
-    
     if st.button("🔍 Buchmacher entschlüsseln"):
         true_1, true_x, true_2, vig = get_true_probabilities(b_odd1, b_oddx, b_odd2)
         implied_xgh, implied_xga = reverse_engineer_odds(true_1, true_x, true_2, rho)
@@ -188,7 +171,7 @@ with tab_reverse:
         c_res1.metric("Erwartete Tore HEIM ($xG$)", f"{implied_xgh}")
         c_res2.metric("Erwartete Tore AUSWÄRTS ($xG$)", f"{implied_xga}")
 
-# --- TAB 3: JOURNAL ---
+# --- TAB 3: JOURNAL & DASHBOARD ---
 with tab_journal:
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     kpi1.metric("Start-Kapital", f"{start_bankroll:.2f} €")
@@ -203,11 +186,33 @@ with tab_journal:
         kpi4.metric("ROI", f"{roi:.2f} %", f"Hitrate: {hitrate:.1f}%")
     else: kpi4.metric("ROI", "0.00 %")
 
+    st.markdown("---")
+    
+    # --- NEU: BANKROLL CHART ---
+    st.subheader("📈 Bankroll Entwicklung")
+    if len(settled_bets) > 0:
+        # Berechnet den Kontostand nach jeder Wette
+        history = [start_bankroll]
+        temp_bankroll = start_bankroll
+        for bet in settled_bets:
+            temp_bankroll -= bet['Einsatz']
+            if bet['Status'] == 'Gewonnen':
+                temp_bankroll += bet['Einsatz'] * bet['Quote']
+            history.append(temp_bankroll)
+            
+        chart_df = pd.DataFrame(history, columns=["Bankroll (€)"])
+        st.line_chart(chart_df, height=250)
+    else:
+        st.info("Werte deine erste Wette als 'Gewonnen' oder 'Verloren' aus, um deinen Chart zu sehen!")
+        
+    st.markdown("---")
+    st.subheader("📋 Wett-Historie")
+
     if len(st.session_state.journal) > 0:
         edited_journal = st.data_editor(st.session_state.journal, column_config={"Status": st.column_config.SelectboxColumn("Status", options=["Offen", "Gewonnen", "Verloren"], required=True)}, hide_index=True, use_container_width=True)
         if edited_journal != st.session_state.journal:
             st.session_state.journal = edited_journal
-            save_journal(st.session_state.journal) # DB Update bei Statusänderung!
+            save_journal(st.session_state.journal)
             st.rerun()
             
         col_btn1, col_btn2 = st.columns(2)
@@ -217,5 +222,5 @@ with tab_journal:
         with col_btn2:
             if st.button("🗑️ Journal löschen"):
                 st.session_state.journal = []
-                save_journal([]) # DB wird geleert!
+                save_journal([])
                 st.rerun()
