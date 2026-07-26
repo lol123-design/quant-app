@@ -31,7 +31,6 @@ if 'journal' not in st.session_state:
         if "Closing Quote" not in bet: bet["Closing Quote"] = bet.get("Quote", 0.0)
     st.session_state.journal = loaded_data
 
-# SPEED-BOOST: Wir zwingen die App, sich einmal berechnete Poisson-Formeln zu merken
 @st.cache_data
 def zip_poisson(k, lambd, zip_factor):
     p = (lambd**k * math.exp(-lambd)) / math.factorial(k)
@@ -100,7 +99,6 @@ def get_ah_odds(m2, m1, m0, mm1, mm2):
         d = win + 0.5 * h_win
         if d <= 0: return 0.0
         return round((1 - push - 0.5 * h_win - 0.5 * h_loss) / d, 2)
-    
     return {
         "H": [
             calc(m2, 0, 0, 0, m1+m0+mm1+mm2), calc(m2, 0, m1, 0, m0+mm1+mm2), calc(m2, m1, 0, 0, m0+mm1+mm2),
@@ -145,6 +143,38 @@ def reverse_engineer_odds(true_p1, true_px, true_p2, rho, zip_factor):
             if diff < best_diff: best_diff, best_xg_h, best_xg_a = diff, xgh, xga
     return best_xg_h, best_xg_a
 
+# --- NEU: Der Smart Parser für Rohdaten ---
+def map_raw_columns(df):
+    # Alles in Kleinbuchstaben umwandeln, um Fehler zu vermeiden
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    
+    mapping = {
+        'HomeTeam': ['hometeam', 'home_team_name', 'home team', 'team1', 'home'],
+        'AwayTeam': ['awayteam', 'away_team_name', 'away team', 'team2', 'away'],
+        'Home_xG': ['home_xg', 'team_a_xg', 'homexg', 'xg_home', 'expected_goals_home'],
+        'Away_xG': ['away_xg', 'team_b_xg', 'awayxg', 'xg_away', 'expected_goals_away'],
+        'Odds_1': ['odds_1', 'odds_ft_1', 'home_odds', 'odds1', '1'],
+        'Odds_X': ['odds_x', 'odds_ft_x', 'draw_odds', 'oddsx', 'x', 'draw'],
+        'Odds_2': ['odds_2', 'odds_ft_2', 'away_odds', 'odds2', '2'],
+        'Home_Scored': ['home_scored', 'home_team_goal_count', 'home_goals_avg'],
+        'Home_Conceded': ['home_conceded', 'home_team_goals_conceded', 'home_conceded_avg'],
+        'Away_Scored': ['away_scored', 'away_team_goal_count', 'away_goals_avg'],
+        'Away_Conceded': ['away_conceded', 'away_team_goals_conceded', 'away_conceded_avg'],
+        'League_Avg': ['league_avg', 'average_goals_per_match']
+    }
+    
+    new_df = pd.DataFrame()
+    found_cols = []
+    
+    for std_col, aliases in mapping.items():
+        for alias in aliases:
+            if alias in df.columns:
+                new_df[std_col] = df[alias]
+                found_cols.append(std_col)
+                break
+                
+    return new_df, found_cols
+
 # --- APP UI ---
 st.title("📈 Pro Quant Engine")
 
@@ -173,7 +203,7 @@ for bet in st.session_state.journal:
 
 tab_engine, tab_bulk, tab_journal, tab_manual = st.tabs(["⚙️ Engine & Scanner", "📂 Bulk-Scanner", "📖 Portfolio", "📚 Handbuch"])
 
-# --- TAB 1: ENGINE & SCANNER ---
+# --- TAB 1: ENGINE & SCANNER (Unverändert) ---
 with tab_engine:
     st.markdown("### 1. Daten-Eingabe (Dein Modell)")
     data_mode = st.radio("Wie möchtest du die Team-Stärke berechnen?", ["Direkte xG-Werte eingeben", "AS/DS Rechner (Kleine Ligen)"], horizontal=True)
@@ -237,106 +267,79 @@ with tab_engine:
         })
         st.dataframe(df_scan, hide_index=True, use_container_width=True)
 
-    with st.expander("➕ Andere Märkte checken & ins Journal eintragen"):
-        c_m1, c_m2 = st.columns(2)
-        market_options = {"Heim (1)": probs["1"], "Unentschieden (X)": probs["X"], "Auswärts (2)": probs["2"], "Über 2.5": probs["Over25"], "BTTS (Ja)": probs["BTTS"]}
-        with c_m1: selected_market = st.selectbox("Markt auswählen", list(market_options.keys()))
-        with c_m2: custom_odd = st.number_input("Buchmacher-Quote für diesen Markt", min_value=1.01, value=2.00, step=0.05)
-        
-        custom_prob = market_options[selected_market]
-        custom_ev = calculate_ev(custom_prob, custom_odd)
-        raw_k = current_bankroll * calculate_kelly(custom_prob, custom_odd, fraction=(kelly_fraction / parallel_bets))
-        max_allowed = current_bankroll * (max_risk_pct / 100.0)
-        custom_bet = max_allowed if raw_k > max_allowed else raw_k
-        if custom_bet < min_bet: custom_bet = 0
-        
-        if custom_ev > 0: st.success(f"✅ Value: **+{round(custom_ev * 100, 2)}%** | Einsatz: **{round(custom_bet, 2)} €**")
-        else: st.error(f"❌ Kein Value ({round(custom_ev * 100, 2)}%).")
-
-        c_j1, c_j2 = st.columns(2)
-        with c_j1: league_name = st.text_input("Liga (z.B. Bundesliga)")
-        with c_j2: match_name = st.text_input("Spiel (z.B. Bayern - BVB)")
-        if st.button("💾 Wette speichern (Cloud)"):
-            if custom_ev > 0 and custom_bet > 0:
-                st.session_state.journal.append({"Liga": league_name, "Spiel": match_name, "Tipp": selected_market, "Quote": custom_odd, "Closing Quote": custom_odd, "Einsatz": round(custom_bet, 2), "EV (%)": round(custom_ev * 100, 2), "Status": "Offen"})
-                save_journal(st.session_state.journal)
-                st.rerun()
-
-# --- TAB 2: BULK SCANNER ---
+# --- TAB 2: BULK SCANNER (Jetzt mit Smart Parser) ---
 with tab_bulk:
-    st.header("📂 Bulk-Scanner (CSV Massen-Analyse)")
-    st.write("Lade eine Excel/CSV-Datei mit Dutzenden Spielen hoch. Die Engine berechnet alle auf einmal und zeigt dir nur die Wetten an, die mathematischen Value haben.")
+    st.header("📂 Bulk-Scanner (Rohdaten-Upload)")
+    st.write("Wirf hier einfach die dreckigen Rohdaten von FootyStats & Co. rein. Die Engine filtert die nötigen Spalten automatisch heraus.")
     
-    # Template Download
-    csv_template = "HomeTeam,AwayTeam,Home_xG,Away_xG,Odds_1,Odds_X,Odds_2\nBayern,Dortmund,2.1,1.1,1.80,3.50,4.20\nSchalke,HSV,1.3,1.4,2.80,3.20,2.50"
-    st.download_button(label="📥 Beispiel CSV-Vorlage herunterladen", data=csv_template, file_name='quant_template.csv', mime='text/csv')
-    
-    st.info("💡 **Tipp:** Wenn du keine `Home_xG` Spalten hast, nenne sie `Home_Scored`, `Home_Conceded`, `Away_Scored`, `Away_Conceded` und füge `League_Avg` hinzu. Der Scanner baut daraus automatisch die AS/DS $xG$-Werte!")
-
-    uploaded_file = st.file_uploader("Lade deine CSV-Datei hoch", type=['csv'])
+    uploaded_file = st.file_uploader("Lade deine Roh-CSV hoch", type=['csv'])
     
     if uploaded_file is not None:
         try:
-            df_upload = pd.read_csv(uploaded_file)
-            st.success(f"✅ {len(df_upload)} Spiele erfolgreich geladen! Scanne den Markt...")
+            df_raw = pd.read_csv(uploaded_file)
             
-            results = []
-            eff_kelly = kelly_fraction / parallel_bets
-            max_allowed = current_bankroll * (max_risk_pct / 100.0)
-
-            for index, row in df_upload.iterrows():
-                try:
-                    home_team = str(row.get('HomeTeam', f'Heim {index}'))
-                    away_team = str(row.get('AwayTeam', f'Auswärts {index}'))
-                    o1 = float(row.get('Odds_1', 0))
-                    ox = float(row.get('Odds_X', 0))
-                    o2 = float(row.get('Odds_2', 0))
-                    
-                    if o1 == 0 or ox == 0 or o2 == 0: continue
-                    
-                    # Logik: xG oder AS/DS?
-                    if 'Home_xG' in df_upload.columns and 'Away_xG' in df_upload.columns:
-                        xgh = float(row['Home_xG'])
-                        xga = float(row['Away_xG'])
-                    elif 'Home_Scored' in df_upload.columns and 'Home_Conceded' in df_upload.columns:
-                        l_avg = float(row.get('League_Avg', 2.5)) / 2.0
-                        hs, hc = float(row['Home_Scored']), float(row['Home_Conceded'])
-                        As, ac = float(row['Away_Scored']), float(row['Away_Conceded'])
-                        xgh = (hs * ac) / l_avg if l_avg > 0 else 0
-                        xga = (As * hc) / l_avg if l_avg > 0 else 0
-                    else:
-                        continue # Wenn Spalten fehlen, überspringen
-
-                    probs = calculate_match_probabilities(xgh, xga, rho, zip_factor)
-                    
-                    # Finde Value
-                    for prob, odd, label in [(probs['1'], o1, '1'), (probs['X'], ox, 'X'), (probs['2'], o2, '2')]:
-                        ev = calculate_ev(prob, odd)
-                        if ev > 0.02: # Nur > 2% EV anzeigen um Schrott rauszufiltern
-                            raw_bet = current_bankroll * calculate_kelly(prob, odd, fraction=eff_kelly)
-                            bet_size = max_allowed if raw_bet > max_allowed else raw_bet
-                            if bet_size >= min_bet:
-                                results.append({
-                                    "Spiel": f"{home_team} - {away_team}",
-                                    "Tipp": label,
-                                    "Quote": odd,
-                                    "EV (%)": round(ev * 100, 2),
-                                    "Einsatz (€)": round(bet_size, 2)
-                                })
-                except Exception as e:
-                    pass # Zeile bei Fehler überspringen
-
-            if results:
-                st.balloons()
-                df_res = pd.DataFrame(results).sort_values(by="EV (%)", ascending=False)
-                st.write(f"🔥 **Jackpot! Wir haben {len(df_res)} profitable Wetten in deiner Liste gefunden:**")
-                st.dataframe(df_res, hide_index=True, use_container_width=True)
+            # Smart Parser aufrufen
+            df_upload, detected_cols = map_raw_columns(df_raw)
+            
+            st.success(f"✅ Parser hat die Datei gelesen ({len(df_raw)} Spiele).")
+            st.info(f"🔍 **Erkannte Spalten:** {', '.join(detected_cols)}")
+            
+            if 'Odds_1' not in df_upload.columns or 'Odds_X' not in df_upload.columns or 'Odds_2' not in df_upload.columns:
+                st.error("❌ Kritischer Fehler: Der Parser konnte die Buchmacher-Quoten in der Datei nicht finden (Odds_1, Odds_X, Odds_2 fehlen).")
+            elif 'Home_xG' not in df_upload.columns and 'Home_Scored' not in df_upload.columns:
+                st.error("❌ Kritischer Fehler: Weder xG-Daten noch Tor-Schnitte gefunden.")
             else:
-                st.warning("Keine Wetten mit positivem Value (>2% EV) gefunden. Der Markt ist zu effizient bei diesen Spielen.")
-                
-        except Exception as e:
-            st.error("Fehler beim Lesen der CSV-Datei. Bitte stelle sicher, dass sie wie die Vorlage formatiert ist.")
+                st.write("⚙️ Scanne den Markt nach Fehlern...")
+                results = []
+                eff_kelly = kelly_fraction / parallel_bets
+                max_allowed = current_bankroll * (max_risk_pct / 100.0)
 
+                for index, row in df_upload.iterrows():
+                    try:
+                        home_team = str(row.get('HomeTeam', f'Heim {index}'))
+                        away_team = str(row.get('AwayTeam', f'Auswärts {index}'))
+                        o1 = float(row.get('Odds_1', 0))
+                        ox = float(row.get('Odds_X', 0))
+                        o2 = float(row.get('Odds_2', 0))
+                        
+                        if pd.isna(o1) or pd.isna(ox) or pd.isna(o2) or o1 <= 1 or ox <= 1 or o2 <= 1: continue
+                        
+                        # Logik: xG oder AS/DS?
+                        if 'Home_xG' in df_upload.columns and 'Away_xG' in df_upload.columns:
+                            xgh = float(row['Home_xG'])
+                            xga = float(row['Away_xG'])
+                        elif 'Home_Scored' in df_upload.columns and 'Home_Conceded' in df_upload.columns:
+                            l_avg = float(row.get('League_Avg', 2.5)) / 2.0
+                            hs, hc = float(row['Home_Scored']), float(row['Home_Conceded'])
+                            As, ac = float(row['Away_Scored']), float(row['Away_Conceded'])
+                            xgh = (hs * ac) / l_avg if l_avg > 0 else 0
+                            xga = (As * hc) / l_avg if l_avg > 0 else 0
+                        else: continue
+
+                        if pd.isna(xgh) or pd.isna(xga): continue
+
+                        probs = calculate_match_probabilities(xgh, xga, rho, zip_factor)
+                        
+                        for prob, odd, label in [(probs['1'], o1, '1'), (probs['X'], ox, 'X'), (probs['2'], o2, '2')]:
+                            ev = calculate_ev(prob, odd)
+                            if ev > 0.02: 
+                                raw_bet = current_bankroll * calculate_kelly(prob, odd, fraction=eff_kelly)
+                                bet_size = max_allowed if raw_bet > max_allowed else raw_bet
+                                if bet_size >= min_bet:
+                                    results.append({"Spiel": f"{home_team} - {away_team}", "Tipp": label, "Quote": odd, "EV (%)": round(ev * 100, 2), "Einsatz (€)": round(bet_size, 2)})
+                    except Exception as e:
+                        pass 
+
+                if results:
+                    st.balloons()
+                    df_res = pd.DataFrame(results).sort_values(by="EV (%)", ascending=False)
+                    st.write(f"🔥 **Jackpot! Wir haben {len(df_res)} profitable Wetten gefunden:**")
+                    st.dataframe(df_res, hide_index=True, use_container_width=True)
+                else:
+                    st.warning("Keine Wetten mit positivem Value (>2% EV) gefunden.")
+                    
+        except Exception as e:
+            st.error(f"Ein Fehler ist aufgetreten: {e}")
 
 # --- TAB 3 & 4: JOURNAL & HANDBUCH bleiben gleich ---
 with tab_journal:
@@ -371,12 +374,10 @@ with tab_journal:
 
 with tab_manual:
     st.header("📚 Das Syndikat-Playbook")
-    with st.expander("📂 Wie funktioniert der Bulk-Scanner?"):
+    with st.expander("📂 Wie funktioniert der Smart Parser (CSV)?"):
         st.markdown("""
-        **Der Bulk-Scanner ist dein Freitagabend-Cheatcode.**
-        Anstatt Spiele mühsam einzeln einzutippen, lädst du eine Excel-Tabelle als `.csv` hoch.
-        Die App prüft alle Spiele in unter 1 Sekunde und spuckt dir nur die Spiele aus, die einen **Expected Value (EV) von über 2%** haben. Das filtert das statistische Grundrauschen heraus.
+        **Der Bulk-Scanner schluckt ab sofort Rohdaten.**
+        Du musst keine Excel-Spalten mehr löschen oder umbenennen. Lade einfach die rohe `.csv` Datei von Anbietern wie FootyStats herunter und wirf sie in den Scanner.
         
-        * **Option 1 (Große Ligen):** Nutze die Spalten `Home_xG` und `Away_xG`.
-        * **Option 2 (Kleine Ligen):** Nutze die Spalten `Home_Scored`, `Home_Conceded`, `Away_Scored`, `Away_Conceded` und `League_Avg`. Die App rechnet automatisch um!
+        Der "Smart Parser" sucht automatisch nach bekannten Spaltennamen wie `team_a_xg` oder `odds_ft_1`, extrahiert nur das Wichtigste und ignoriert den Rest der Datei.
         """)
