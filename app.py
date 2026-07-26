@@ -44,8 +44,6 @@ def dixon_coles_adjustment(home_goals, away_goals, lambd, mu, rho):
 
 def calculate_match_probabilities(xg_home, xg_away, rho, zip_factor, current_minute=0, score_home=0, score_away=0, red_home=False, red_away=False):
     prob_1, prob_x, prob_2, prob_over_25, prob_btts = 0.0, 0.0, 0.0, 0.0, 0.0
-    
-    # NEU: Exakte Tor-Margen für Asian Handicaps
     p_m_plus2, p_m_plus1, p_m_0, p_m_minus1, p_m_minus2 = 0.0, 0.0, 0.0, 0.0, 0.0
     
     time_factor = max((90 - current_minute) / 90.0, 0.001)
@@ -83,7 +81,6 @@ def calculate_match_probabilities(xg_home, xg_away, rho, zip_factor, current_min
     total_prob = prob_1 + prob_x + prob_2
     p1, px, p2 = prob_1 / total_prob, prob_x / total_prob, prob_2 / total_prob
     
-    # Margen normalisieren
     m_total = p_m_plus2 + p_m_plus1 + p_m_0 + p_m_minus1 + p_m_minus2
     if m_total > 0:
         p_m_plus2 /= m_total; p_m_plus1 /= m_total; p_m_0 /= m_total; p_m_minus1 /= m_total; p_m_minus2 /= m_total
@@ -253,6 +250,7 @@ with tab_engine:
                 return round(bet_size, 2) if bet_size >= min_bet else 0.0
             return 0.0
 
+        # BUGFIX: Sauberes DataFrame ohne alte Pandas `.style` Methoden, die Server-Crashs verursachen
         df_scan = pd.DataFrame({
             "Tipp": ["Heim (1)", "Unentschieden (X)", "Auswärts (2)"],
             "Faire Quote": [format_odds(probs["1"]), format_odds(probs["X"]), format_odds(probs["2"])],
@@ -260,14 +258,11 @@ with tab_engine:
             "EV (%)": [round(ev_1 * 100, 2), round(ev_x * 100, 2), round(ev_2 * 100, 2)],
             "Einsatz (€)": [process_bet(ev_1, probs["1"], b_odd1), process_bet(ev_x, probs["X"], b_oddx), process_bet(ev_2, probs["2"], b_odd2)]
         })
-        st.dataframe(df_scan.style.applymap(lambda x: 'background-color: lightgreen' if isinstance(x, (int, float)) and x > 0 else '', subset=['EV (%)', 'Einsatz (€)']), hide_index=True)
+        st.dataframe(df_scan, hide_index=True, use_container_width=True)
 
-    # NEU: Die Asian Handicap Matrix (Exakte Quoten für Pinnacle & Co.)
     with st.expander("🏮 Asian Handicap (Faire Quoten Matrix)", expanded=False):
-        st.write("Die exakten mathematischen Quoten für Viertel- und Halblinien. Vergleiche sie mit asiatischen Brokern (z.B. Pinnacle).")
         m = probs["margins"]
         ah_data = get_ah_odds(m["+2"], m["+1"], m["0"], m["-1"], m["-2"])
-        
         ah_labels_h = ["-1.5", "-1.0", "-0.75", "-0.5", "-0.25", "0.0 (DNB)", "+0.25", "+0.5", "+0.75", "+1.0", "+1.5"]
         ah_labels_a = ["+1.5", "+1.0", "+0.75", "+0.5", "+0.25", "0.0 (DNB)", "-0.25", "-0.5", "-0.75", "-1.0", "-1.5"]
         
@@ -279,9 +274,36 @@ with tab_engine:
         })
         st.dataframe(df_ah, hide_index=True, use_container_width=True)
 
+    # NEU: Der Live Cashout & Hedge Rechner
+    with st.expander("🛡️ Live Cashout & Hedge-Rechner", expanded=False):
+        st.markdown("Führt dein Team live und der Buchmacher bietet einen Cashout an? Finde heraus, ob das Angebot fair ist oder du dich besser selbst absichern solltest (Hedging).")
+        
+        c_h1, c_h2 = st.columns(2)
+        with c_h1: h_orig_stake = st.number_input("Dein Einsatz (€)", min_value=1.0, value=10.0, step=1.0)
+        with c_h2: h_orig_odds = st.number_input("Gespielte Quote", min_value=1.01, value=3.0, step=0.05)
+        
+        c_h3, c_h4 = st.columns(2)
+        with c_h3: h_opp_odds = st.number_input("Aktuelle Gegenquote", min_value=1.01, value=1.5, step=0.05, help="Wenn du auf Heim(1) gewettet hast, ist das die Live-Quote für X2.")
+        with c_h4: h_cashout = st.number_input("Cashout-Angebot (€)", min_value=0.0, value=15.0, step=1.0)
+
+        hedge_stake = (h_orig_stake * h_orig_odds) / h_opp_odds
+        guaranteed_return = h_orig_stake * h_orig_odds
+        net_profit = guaranteed_return - h_orig_stake - hedge_stake
+        
+        st.markdown("---")
+        st.markdown(f"**💡 Strategie: Risikofreies Hedging**")
+        st.info(f"Wenn du jetzt **{round(hedge_stake, 2)} €** auf die Gegenquote setzt, gewinnst du unabhängig vom Spielausgang **garantiert {round(net_profit, 2)} €** reinen Profit.")
+        
+        cashout_profit = h_cashout - h_orig_stake
+        
+        if cashout_profit >= net_profit:
+            st.success(f"✅ **CASHOUT ANNEHMEN!** Dein Buchmacher bietet dir {round(cashout_profit, 2)} € Profit. Das ist besser als manuelles Absichern.")
+        else:
+            st.error(f"❌ **CASHOUT IGNORIEREN!** Der Buchmacher klaut dir {round(net_profit - cashout_profit, 2)} € Profit. Sichere die Wette besser manuell über die Gegenquote ab!")
+
+
     st.markdown("---")
-    with st.expander("➕ Andere Märkte checken & ins Journal eintragen (Über/Unter, BTTS)"):
-        st.write("Hast du Value gefunden oder willst einen anderen Markt (z.B. Über 2.5) checken?")
+    with st.expander("➕ Andere Märkte checken & ins Journal eintragen"):
         c_m1, c_m2 = st.columns(2)
         market_options = {"Heim (1)": probs["1"], "Unentschieden (X)": probs["X"], "Auswärts (2)": probs["2"], "Über 2.5": probs["Over25"], "BTTS (Ja)": probs["BTTS"]}
         with c_m1: selected_market = st.selectbox("Markt auswählen", list(market_options.keys()))
@@ -290,8 +312,9 @@ with tab_engine:
         custom_prob = market_options[selected_market]
         custom_ev = calculate_ev(custom_prob, custom_odd)
         
-        raw_k = current_bankroll * calculate_kelly(custom_prob, custom_odd, fraction=eff_kelly)
-        custom_bet = max_allowed_bet if raw_k > max_allowed_bet else raw_k
+        raw_k = current_bankroll * calculate_kelly(custom_prob, custom_odd, fraction=(kelly_fraction / parallel_bets))
+        max_allowed = current_bankroll * (max_risk_pct / 100.0)
+        custom_bet = max_allowed if raw_k > max_allowed else raw_k
         if custom_bet < min_bet: custom_bet = 0
         
         if custom_ev > 0:
@@ -299,7 +322,6 @@ with tab_engine:
         else:
             st.error(f"❌ Kein Value auf {selected_market} ({round(custom_ev * 100, 2)}%).")
 
-        st.markdown("**Ins Journal eintragen:**")
         c_j1, c_j2 = st.columns(2)
         with c_j1: league_name = st.text_input("Liga (z.B. Bundesliga)")
         with c_j2: match_name = st.text_input("Spiel (z.B. Bayern - BVB)")
@@ -366,9 +388,10 @@ with tab_journal:
 
 with tab_manual:
     st.header("📚 Das Syndikat-Playbook")
-    with st.expander("1. Asian Handicaps (-0.25 / +0.75)"):
+    with st.expander("🛡️ Hedging vs. Cashout (Der Live-Rechner)"):
         st.markdown("""
-        **Viertel-Linien (Quarter Lines):** Dein Einsatz wird virtuell geteilt.
-        * **-0.25:** Eine Hälfte auf Sieg, eine Hälfte auf Draw No Bet. Wenn das Spiel Unentschieden endet, verlierst du nur die halbe Wette (Half-Loss).
-        * **+0.75:** Eine Hälfte auf +0.5, eine auf +1.0. Wenn dein Team mit genau 1 Tor verliert, bekommst du die Hälfte des Geldes zurück, die andere verlierst du.
+        **Nimm niemals blind den Cashout!**
+        Wenn du eine Wette gewinnst und zitterst, kannst du bei einem anderen Buchmacher auf das exakte Gegenteil wetten (Hedging). 
+        * **Beispiel:** Du hast Heim (1) gewettet. Du wettest jetzt live auf X2.
+        Der Rechner zeigt dir exakt, wie viel Geld du setzen musst, um dir einen garantierten Gewinn (egal wer das Spiel gewinnt) zu sichern, und ob das Angebot des Buchmachers schlechter ist als deine eigene Absicherung.
         """)
