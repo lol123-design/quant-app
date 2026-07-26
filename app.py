@@ -22,12 +22,10 @@ def save_journal(journal_data):
     try: requests.put(JSONBIN_URL, json={"data": journal_data}, headers=headers)
     except: pass
 
-# Beim Laden prüfen, ob alte Wetten das Feld "Liga" haben, sonst ergänzen
 if 'journal' not in st.session_state:
     loaded_data = load_journal()
     for bet in loaded_data:
-        if "Liga" not in bet:
-            bet["Liga"] = "Unbekannt"
+        if "Liga" not in bet: bet["Liga"] = "Unbekannt"
     st.session_state.journal = loaded_data
 
 def poisson_prob(k, lambd):
@@ -108,6 +106,17 @@ st.title("📈 Pro Quant Engine")
 st.sidebar.header("🏦 Start-Kapital")
 start_bankroll = st.sidebar.number_input("Initiale Bankroll (€)", min_value=1.0, value=10.0, step=0.5)
 min_bet = st.sidebar.number_input("Mindesteinsatz (€)", min_value=0.1, value=0.5, step=0.1)
+
+# NEU: Risikomanagement Sidebar
+st.sidebar.header("🛡️ Risikomanagement")
+kelly_fraction = st.sidebar.select_slider(
+    "Kelly-Strategie", 
+    options=[0.125, 0.25, 0.5, 1.0], 
+    value=0.25, 
+    format_func=lambda x: f"{int(1/x)}/1 Kelly (Defensiv)" if x == 0.125 else (f"{int(1/x)}/1 Kelly (Standard)" if x == 0.25 else (f"{int(1/x)}/1 Kelly (Aggressiv)" if x == 0.5 else "Full Kelly (Wahnsinn)"))
+)
+max_risk_pct = st.sidebar.slider("Max. Einsatz pro Wette (%)", min_value=1.0, max_value=10.0, value=5.0, step=0.5)
+
 st.sidebar.header("⚙️ Engine Settings")
 rho = st.sidebar.slider("Dixon-Coles Faktor", min_value=-0.30, max_value=0.00, value=-0.15, step=0.01)
 
@@ -169,14 +178,29 @@ with tab_engine:
     with col_input2: target_odds = st.number_input("Buchmacher-Quote", min_value=1.01, value=2.00, step=0.05)
 
     ev = calculate_ev(target_prob_input / 100.0, target_odds)
-    bet_size = current_bankroll * calculate_kelly(target_prob_input / 100.0, target_odds, fraction=0.25)
+    
+    # NEU: Dynamische Kelly und Risiko-Cap Berechnung
+    raw_kelly_bet = current_bankroll * calculate_kelly(target_prob_input / 100.0, target_odds, fraction=kelly_fraction)
+    max_allowed_bet = current_bankroll * (max_risk_pct / 100.0)
+    
+    is_capped = False
+    if raw_kelly_bet > max_allowed_bet:
+        bet_size = max_allowed_bet
+        is_capped = True
+    else:
+        bet_size = raw_kelly_bet
+        
     if bet_size > 0 and bet_size < min_bet: bet_size = min_bet
 
     if ev > 0:
-        st.success(f"✅ Positiver EV: **+{round(ev * 100, 2)}%** | Einsatz: **{round(bet_size, 2)} €**")
+        st.success(f"✅ Positiver EV: **+{round(ev * 100, 2)}%** | Empfohlener Einsatz: **{round(bet_size, 2)} €**")
+        
+        # Warnung, wenn die Notbremse greift
+        if is_capped:
+            st.warning(f"⚠️ Einsatz wurde durch dein Sicherheits-Limit ({max_risk_pct}% der Bankroll) gedeckelt. Original Kelly hätte {round(raw_kelly_bet, 2)} € gefordert.")
+
         with st.expander("Wette ins Journal übernehmen"):
             c_j1, c_j2, c_j3 = st.columns(3)
-            # NEU: Das Feld für die Liga
             with c_j1: league_name = st.text_input("Liga (z.B. Schweden)")
             with c_j2: match_name = st.text_input("Spiel (z.B. Team A - Team B)")
             with c_j3: market_name = st.text_input("Tipp (z.B. Heim 1)")
@@ -241,8 +265,6 @@ with tab_journal:
         st.subheader("🔍 Markt-Analyse")
         if len(settled_bets) > 0:
             df_settled = pd.DataFrame(settled_bets)
-            
-            # Markt-Stats
             market_stats = []
             for market in df_settled['Tipp'].unique():
                 m_bets = df_settled[df_settled['Tipp'] == market]
@@ -254,8 +276,6 @@ with tab_journal:
             st.dataframe(pd.DataFrame(market_stats).sort_values(by="Profit (€)", ascending=False), hide_index=True, use_container_width=True)
             
             st.markdown("---")
-            
-            # NEU: Ligen-Stats
             st.subheader("🌍 Ligen-Analyse")
             league_stats = []
             for league in df_settled['Liga'].unique():
@@ -270,7 +290,6 @@ with tab_journal:
     st.markdown("---")
     st.subheader("📋 Wett-Historie")
     if len(st.session_state.journal) > 0:
-        # Die Liga wird jetzt auch in der Haupttabelle angezeigt
         edited_journal = st.data_editor(st.session_state.journal, column_config={"Status": st.column_config.SelectboxColumn("Status", options=["Offen", "Gewonnen", "Verloren"], required=True)}, hide_index=True, use_container_width=True)
         if edited_journal != st.session_state.journal:
             st.session_state.journal = edited_journal
