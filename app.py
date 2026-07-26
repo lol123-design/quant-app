@@ -97,10 +97,26 @@ def calculate_kelly(prob, odds, fraction=0.25):
     return k * fraction if k > 0 else 0
 def format_odds(prob): return round(1 / prob, 2) if prob > 0 else 0.0
 
+# NEU: Die Power-Methode zur asymmetrischen Margen-Entfernung
 def get_true_probabilities(odds_1, odds_x, odds_2):
     i1, ix, i2 = 1 / odds_1, 1 / odds_x, 1 / odds_2
     vig = i1 + ix + i2
-    return i1 / vig, ix / vig, i2 / vig, vig
+    
+    # Wenn keine Marge vorhanden ist (z.B. Arbitrage), fallback zur naiven Methode
+    if vig <= 1.0:
+        return i1/vig, ix/vig, i2/vig, vig
+        
+    # Iterative binäre Suche (Newton-Raphson Annäherung) für den Faktor k
+    low, high = 1.0, 10.0
+    for _ in range(50):
+        k = (low + high) / 2
+        if (i1**k + ix**k + i2**k) > 1.0:
+            low = k
+        else:
+            high = k
+            
+    true_1, true_x, true_2 = i1**k, ix**k, i2**k
+    return true_1, true_x, true_2, vig
 
 def reverse_engineer_odds(true_p1, true_px, true_p2, rho, zip_factor):
     best_diff, best_xg_h, best_xg_a = 999.0, 1.0, 1.0
@@ -141,7 +157,6 @@ for bet in st.session_state.journal:
     if bet['Status'] == 'Gewonnen': current_bankroll += bet['Einsatz'] * bet['Quote']
     if bet['Status'] == 'Offen': exposure += bet['Einsatz']
 
-# NEU: Der vierte Tab "Handbuch"
 tab_engine, tab_reverse, tab_journal, tab_manual = st.tabs(["⚙️ Engine", "🕵️ Reverse", "📖 Portfolio", "📚 Handbuch"])
 
 # --- TAB 1: ENGINE ---
@@ -237,7 +252,7 @@ with tab_engine:
                 st.rerun()
     else: st.error(f"❌ Negativer EV: **{round(ev * 100, 2)}%**. Kein Value.")
 
-# --- TAB 2 bleibt identisch ---
+# --- TAB 2: REVERSE ENGINEERING ---
 with tab_reverse:
     st.header("🕵️ Buchmacher entschlüsseln")
     st.info("Nutze diesen Tab, um zu sehen, wie der Markt denkt. Vergleiche den Wert dann mit deinen eigenen Berechnungen aus Tab 1.")
@@ -248,7 +263,10 @@ with tab_reverse:
     if st.button("🔍 Buchmacher entschlüsseln"):
         true_1, true_x, true_2, vig = get_true_probabilities(b_odd1, b_oddx, b_odd2)
         implied_xgh, implied_xga = reverse_engineer_odds(true_1, true_x, true_2, rho, zip_factor)
-        st.info(f"📊 **Buchmacher-Marge (Vig):** {round((vig - 1) * 100, 2)}%")
+        
+        # Hinweis-Banner auf die Power-Methode
+        st.success(f"📊 **Buchmacher-Marge (Vig):** {round((vig - 1) * 100, 2)}% | ⚙️ **Marge asymmetrisch bereinigt (Power-Methode)**")
+        
         c_res1, c_res2 = st.columns(2)
         c_res1.metric("Erwartete Tore HEIM ($xG$)", f"{implied_xgh}")
         c_res2.metric("Erwartete Tore AUSWÄRTS ($xG$)", f"{implied_xga}")
@@ -368,10 +386,10 @@ with tab_manual:
     
     with st.expander("1. Wie füttere ich kleine Ligen? (AS/DS Proxy)"):
         st.markdown("""
-        In **kleinen Ligen** (z.B. Regionalliga, Schweden 2) haben Buchmacher oft schlechte Daten. Genau hier hast du deinen Edge. Da es dort keine echten Expected Goals ($xG$) gibt, berechnet die App einen **Proxy-$xG$**.
+        In **kleinen Ligen** haben Buchmacher oft schlechte Daten. Genau hier hast du deinen Edge. Da es dort keine echten Expected Goals ($xG$) gibt, berechnet die App einen **Proxy-$xG$**.
         
         **So geht's:**
-        1. Öffne Flashscore (oder eine ähnliche App).
+        1. Öffne Flashscore (oder ähnlich).
         2. Gehe zur Tabelle der Liga und wähle **"Heim / Auswärts"** (NICHT die Gesamttabelle!).
         3. Lies die geschossenen/kassierten Tore pro Spiel ab und trage sie ein.
         4. Die Engine verrechnet die Angriffsstärke (AS) des Heimteams mit der Abwehrschwäche (DS) des Auswärtsteams.
@@ -382,10 +400,10 @@ with tab_manual:
         Wenn ein Spiel live läuft, rechnet die Engine automatisch mit dem **Time-Decay** (Zeitverfall). Ein $xG$-Wert von 1.5 schrumpft z.B. in der 45. Minute auf 0.75 zusammen.
         
         **Die Rote Karte (Schock):**
-        Wenn ein Spieler vom Platz fliegt, geraten Buchmacher oft in Panik. Deine Engine nutzt historische Multiplikatoren:
+        Wenn ein Spieler vom Platz fliegt, geraten Buchmacher in Panik. Deine Engine nutzt historische Multiplikatoren:
         * **Unterzahl:** Das Team generiert 40% weniger Torchancen.
         * **Überzahl:** Der Gegner generiert 35% mehr Torchancen.
-        Setze einfach das Häkchen und die Engine spuckt dir in Echtzeit die korrigierten Quoten aus.
+        Setze das Häkchen und die Engine spuckt dir in Echtzeit die korrigierten Quoten aus.
         """)
         
     with st.expander("3. Was ist der ZIP-Faktor (Zero-Inflation)?"):
@@ -393,14 +411,17 @@ with tab_manual:
         Die Poisson-Verteilung ist blind für menschliches Verhalten. Sie weiß nicht, dass Teams ab der 75. Minute bei einem 1:1 oft "den Bus parken" und defensiver spielen.
         
         **Die Lösung:**
-        Der **ZIP-Faktor (Standard: 5%)** hebt die Wahrscheinlichkeit für exakt 0 Tore in der restlichen Spielzeit künstlich an und senkt Ausreißer (wie 5:1) ab. Drehe diesen Wert bei besonders defensiven Ligen ruhig auf 8% oder 10% hoch.
+        Der **ZIP-Faktor (Standard: 5%)** hebt die Wahrscheinlichkeit für exakt 0 Tore künstlich an und senkt Ausreißer (wie 5:1) ab.
         """)
         
-    with st.expander("4. CLV & Monte Carlo (Der Heilige Gral)"):
+    with st.expander("4. CLV, Monte Carlo & Power-Methode"):
         st.markdown("""
         **CLV (Closing Line Value):**
-        Der wichtigste Wert im Journal. Wenn du eine Quote von 2.10 kaufst und das Spiel bei 1.90 startet (Closing Line), bist du dem Markt voraus. Langfristig positiver CLV = Garantierter Reichtum, egal wie viele Spiele kurzfristig durch Pech verloren gehen.
+        Der wichtigste Wert. Wenn du eine Quote von 2.10 kaufst und das Spiel bei 1.90 startet (Closing Line), bist du dem Markt voraus.
         
         **Monte Carlo:**
-        Simuliert 50 parallele Zukünfte basierend auf deiner echten Hitrate. Der wichtigste Wert hier ist der **Risk of Ruin (Pleite-Risiko)**. Halte diesen Wert durch Anpassung des Kelly-Reglers immer unter 5%.
+        Simuliert 50 parallele Zukünfte basierend auf deiner echten Hitrate. Halte deinen **Risk of Ruin** durch den Kelly-Regler unter 5%.
+        
+        **Power-Methode (Tab 2):**
+        Buchmacher schlagen auf Außenseiter mehr Marge auf als auf Favoriten (Favorite-Longshot Bias). Tab 2 nutzt eine iterative binäre Suche (Power-Methode), um die Marge asymmetrisch herauszurechnen und so die wahren xG-Werte der Buchmacher zu entschlüsseln.
         """)
