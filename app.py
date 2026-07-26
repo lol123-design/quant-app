@@ -149,7 +149,7 @@ with tab_engine:
         st.success(f"✅ Positiver EV: **+{round(ev * 100, 2)}%** | Einsatz: **{round(bet_size, 2)} €**")
         with st.expander("Wette ins Journal übernehmen"):
             match_name = st.text_input("Spiel (z.B. Sparta Prag - Brünn)")
-            market_name = st.text_input("Tipp (z.B. Heim 1)")
+            market_name = st.text_input("Tipp (z.B. Heim -1.5)") # Wichtig für die Analytics!
             if st.button("Ins Journal eintragen (Cloud Sync)"):
                 st.session_state.journal.append({"Spiel": match_name, "Tipp": market_name, "Quote": target_odds, "Einsatz": round(bet_size, 2), "EV (%)": round(ev * 100, 2), "Status": "Offen"})
                 save_journal(st.session_state.journal)
@@ -188,23 +188,48 @@ with tab_journal:
 
     st.markdown("---")
     
-    # --- NEU: BANKROLL CHART ---
-    st.subheader("📈 Bankroll Entwicklung")
-    if len(settled_bets) > 0:
-        # Berechnet den Kontostand nach jeder Wette
-        history = [start_bankroll]
-        temp_bankroll = start_bankroll
-        for bet in settled_bets:
-            temp_bankroll -= bet['Einsatz']
-            if bet['Status'] == 'Gewonnen':
-                temp_bankroll += bet['Einsatz'] * bet['Quote']
-            history.append(temp_bankroll)
+    col_chart, col_analytics = st.columns([1.5, 1])
+    
+    with col_chart:
+        st.subheader("📈 Bankroll Entwicklung")
+        if len(settled_bets) > 0:
+            history = [start_bankroll]
+            temp_bankroll = start_bankroll
+            for bet in settled_bets:
+                temp_bankroll -= bet['Einsatz']
+                if bet['Status'] == 'Gewonnen': temp_bankroll += bet['Einsatz'] * bet['Quote']
+                history.append(temp_bankroll)
+            st.line_chart(pd.DataFrame(history, columns=["Bankroll (€)"]), height=250)
+        else:
+            st.info("Werte Wetten aus, um den Chart zu sehen.")
+
+    # --- NEU: PORTFOLIO ANALYTICS ---
+    with col_analytics:
+        st.subheader("🔍 Markt-Analyse")
+        if len(settled_bets) > 0:
+            df_settled = pd.DataFrame(settled_bets)
+            market_stats = []
             
-        chart_df = pd.DataFrame(history, columns=["Bankroll (€)"])
-        st.line_chart(chart_df, height=250)
-    else:
-        st.info("Werte deine erste Wette als 'Gewonnen' oder 'Verloren' aus, um deinen Chart zu sehen!")
-        
+            for market in df_settled['Tipp'].unique():
+                m_bets = df_settled[df_settled['Tipp'] == market]
+                count = len(m_bets)
+                invested = m_bets['Einsatz'].sum()
+                returned = m_bets.apply(lambda row: row['Einsatz'] * row['Quote'] if row['Status'] == 'Gewonnen' else 0, axis=1).sum()
+                profit = returned - invested
+                m_roi = (profit / invested * 100) if invested > 0 else 0
+                
+                market_stats.append({
+                    "Markt": market,
+                    "Wetten": count,
+                    "Profit (€)": round(profit, 2),
+                    "ROI (%)": round(m_roi, 1)
+                })
+                
+            df_markets = pd.DataFrame(market_stats).sort_values(by="Profit (€)", ascending=False)
+            st.dataframe(df_markets, hide_index=True, use_container_width=True)
+        else:
+            st.write("Noch keine Daten für Analyse.")
+
     st.markdown("---")
     st.subheader("📋 Wett-Historie")
 
