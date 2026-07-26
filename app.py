@@ -22,10 +22,13 @@ def save_journal(journal_data):
     try: requests.put(JSONBIN_URL, json={"data": journal_data}, headers=headers)
     except: pass
 
+# --- DATEN-UPDATE FÜR ALTE WETTEN (Sicherheits-Check) ---
 if 'journal' not in st.session_state:
     loaded_data = load_journal()
     for bet in loaded_data:
         if "Liga" not in bet: bet["Liga"] = "Unbekannt"
+        # Wenn noch keine Closing Quote vorhanden ist, setzen wir sie auf die normale Quote (CLV = 0%)
+        if "Closing Quote" not in bet: bet["Closing Quote"] = bet.get("Quote", 0.0)
     st.session_state.journal = loaded_data
 
 def poisson_prob(k, lambd):
@@ -107,7 +110,6 @@ st.sidebar.header("🏦 Start-Kapital")
 start_bankroll = st.sidebar.number_input("Initiale Bankroll (€)", min_value=1.0, value=10.0, step=0.5)
 min_bet = st.sidebar.number_input("Mindesteinsatz (€)", min_value=0.1, value=0.5, step=0.1)
 
-# NEU: Risikomanagement Sidebar
 st.sidebar.header("🛡️ Risikomanagement")
 kelly_fraction = st.sidebar.select_slider(
     "Kelly-Strategie", 
@@ -116,7 +118,6 @@ kelly_fraction = st.sidebar.select_slider(
     format_func=lambda x: f"{int(1/x)}/1 Kelly (Defensiv)" if x == 0.125 else (f"{int(1/x)}/1 Kelly (Standard)" if x == 0.25 else (f"{int(1/x)}/1 Kelly (Aggressiv)" if x == 0.5 else "Full Kelly (Wahnsinn)"))
 )
 max_risk_pct = st.sidebar.slider("Max. Einsatz pro Wette (%)", min_value=1.0, max_value=10.0, value=5.0, step=0.5)
-
 st.sidebar.header("⚙️ Engine Settings")
 rho = st.sidebar.slider("Dixon-Coles Faktor", min_value=-0.30, max_value=0.00, value=-0.15, step=0.01)
 
@@ -126,7 +127,7 @@ for bet in st.session_state.journal:
     if bet['Status'] == 'Gewonnen': current_bankroll += bet['Einsatz'] * bet['Quote']
     if bet['Status'] == 'Offen': exposure += bet['Einsatz']
 
-tab_engine, tab_reverse, tab_journal = st.tabs(["⚙️ Engine", "🕵️ Reverse", "📖 Portfolio"])
+tab_engine, tab_reverse, tab_journal = st.tabs(["⚙️ Engine", "🕵️ Reverse", "📖 Portfolio & CLV"])
 
 # --- TAB 1: ENGINE ---
 with tab_engine:
@@ -150,8 +151,7 @@ with tab_engine:
             away_scored = st.number_input("Ø Tore geschossen (Ausw.)", min_value=0.0, value=1.1, step=0.1)
             away_conceded = st.number_input("Ø Tore kassiert (Ausw.)", min_value=0.0, value=1.5, step=0.1)
         
-        xg_home = (home_scored + away_conceded) / 2.0
-        xg_away = (away_scored + home_conceded) / 2.0
+        xg_home, xg_away = (home_scored + away_conceded) / 2.0, (away_scored + home_conceded) / 2.0
         st.success(f"🤖 **Generierte Stärke (Proxy-$xG$):** Heim **{round(xg_home, 2)}** | Auswärts **{round(xg_away, 2)}**")
 
     st.markdown("---")
@@ -178,26 +178,19 @@ with tab_engine:
     with col_input2: target_odds = st.number_input("Buchmacher-Quote", min_value=1.01, value=2.00, step=0.05)
 
     ev = calculate_ev(target_prob_input / 100.0, target_odds)
-    
-    # NEU: Dynamische Kelly und Risiko-Cap Berechnung
     raw_kelly_bet = current_bankroll * calculate_kelly(target_prob_input / 100.0, target_odds, fraction=kelly_fraction)
     max_allowed_bet = current_bankroll * (max_risk_pct / 100.0)
     
     is_capped = False
     if raw_kelly_bet > max_allowed_bet:
-        bet_size = max_allowed_bet
-        is_capped = True
-    else:
-        bet_size = raw_kelly_bet
+        bet_size, is_capped = max_allowed_bet, True
+    else: bet_size = raw_kelly_bet
         
     if bet_size > 0 and bet_size < min_bet: bet_size = min_bet
 
     if ev > 0:
         st.success(f"✅ Positiver EV: **+{round(ev * 100, 2)}%** | Empfohlener Einsatz: **{round(bet_size, 2)} €**")
-        
-        # Warnung, wenn die Notbremse greift
-        if is_capped:
-            st.warning(f"⚠️ Einsatz wurde durch dein Sicherheits-Limit ({max_risk_pct}% der Bankroll) gedeckelt. Original Kelly hätte {round(raw_kelly_bet, 2)} € gefordert.")
+        if is_capped: st.warning(f"⚠️ Einsatz wurde durch dein Sicherheits-Limit gedeckelt.")
 
         with st.expander("Wette ins Journal übernehmen"):
             c_j1, c_j2, c_j3 = st.columns(3)
@@ -211,6 +204,7 @@ with tab_engine:
                     "Spiel": match_name, 
                     "Tipp": market_name, 
                     "Quote": target_odds, 
+                    "Closing Quote": target_odds, # Initiale Closing Line ist die Kauf-Quote (CLV = 0%)
                     "Einsatz": round(bet_size, 2), 
                     "EV (%)": round(ev * 100, 2), 
                     "Status": "Offen"
@@ -237,17 +231,25 @@ with tab_reverse:
 
 # --- TAB 3: JOURNAL & DASHBOARD ---
 with tab_journal:
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    # NEU: 5 KPIs inklusive CLV
+    kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
     kpi1.metric("Start-Kapital", f"{start_bankroll:.2f} €")
     kpi2.metric("Akt. Bankroll", f"{current_bankroll:.2f} €", f"{current_bankroll - start_bankroll:.2f} € Profit")
     kpi3.metric("Gebundenes", f"{exposure:.2f} €")
+    
     settled_bets = [b for b in st.session_state.journal if b['Status'] in ['Gewonnen', 'Verloren']]
     total_invested = sum(b['Einsatz'] for b in settled_bets)
+    
     if total_invested > 0:
         roi = ((current_bankroll - start_bankroll) / total_invested) * 100
         hitrate = (len([b for b in settled_bets if b['Status'] == 'Gewonnen']) / len(settled_bets)) * 100
         kpi4.metric("ROI", f"{roi:.2f} %", f"Hitrate: {hitrate:.1f}%")
     else: kpi4.metric("ROI", "0.00 %")
+
+    # CLV Berechnung über das gesamte Portfolio (nur für ausgewertete Wetten, oder wo Closing Quote valid ist)
+    valid_clvs = [((b['Quote'] / b['Closing Quote']) - 1) * 100 for b in st.session_state.journal if pd.notna(b.get('Closing Quote')) and float(b.get('Closing Quote', 0)) > 0]
+    avg_clv = sum(valid_clvs) / len(valid_clvs) if valid_clvs else 0.0
+    kpi5.metric("Ø CLV", f"{avg_clv:+.2f} %")
 
     st.markdown("---")
     col_chart, col_analytics = st.columns([1.5, 1])
@@ -270,9 +272,13 @@ with tab_journal:
                 m_bets = df_settled[df_settled['Tipp'] == market]
                 count, invested = len(m_bets), m_bets['Einsatz'].sum()
                 returned = m_bets.apply(lambda r: r['Einsatz'] * r['Quote'] if r['Status'] == 'Gewonnen' else 0, axis=1).sum()
-                profit = returned - invested
-                m_roi = (profit / invested * 100) if invested > 0 else 0
-                market_stats.append({"Markt": market, "Wetten": count, "Profit (€)": round(profit, 2), "ROI (%)": round(m_roi, 1)})
+                profit, m_roi = returned - invested, (returned - invested) / invested * 100 if invested > 0 else 0
+                
+                # CLV pro Markt
+                m_clv_list = [((r['Quote'] / r['Closing Quote']) - 1) * 100 for _, r in m_bets.iterrows() if pd.notna(r.get('Closing Quote')) and float(r.get('Closing Quote', 0)) > 0]
+                m_avg_clv = sum(m_clv_list) / len(m_clv_list) if m_clv_list else 0.0
+                
+                market_stats.append({"Markt": market, "Wetten": count, "Profit (€)": round(profit, 2), "ROI (%)": round(m_roi, 1), "Ø CLV (%)": round(m_avg_clv, 2)})
             st.dataframe(pd.DataFrame(market_stats).sort_values(by="Profit (€)", ascending=False), hide_index=True, use_container_width=True)
             
             st.markdown("---")
@@ -282,19 +288,36 @@ with tab_journal:
                 l_bets = df_settled[df_settled['Liga'] == league]
                 count, invested = len(l_bets), l_bets['Einsatz'].sum()
                 returned = l_bets.apply(lambda r: r['Einsatz'] * r['Quote'] if r['Status'] == 'Gewonnen' else 0, axis=1).sum()
-                profit = returned - invested
-                l_roi = (profit / invested * 100) if invested > 0 else 0
-                league_stats.append({"Liga": league, "Wetten": count, "Profit (€)": round(profit, 2), "ROI (%)": round(l_roi, 1)})
+                profit, l_roi = returned - invested, (returned - invested) / invested * 100 if invested > 0 else 0
+                
+                # CLV pro Liga
+                l_clv_list = [((r['Quote'] / r['Closing Quote']) - 1) * 100 for _, r in l_bets.iterrows() if pd.notna(r.get('Closing Quote')) and float(r.get('Closing Quote', 0)) > 0]
+                l_avg_clv = sum(l_clv_list) / len(l_clv_list) if l_clv_list else 0.0
+                
+                league_stats.append({"Liga": league, "Wetten": count, "Profit (€)": round(profit, 2), "ROI (%)": round(l_roi, 1), "Ø CLV (%)": round(l_avg_clv, 2)})
             st.dataframe(pd.DataFrame(league_stats).sort_values(by="Profit (€)", ascending=False), hide_index=True, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("📋 Wett-Historie")
+    st.subheader("📋 Wett-Historie & CLV-Eingabe")
+    st.info("Trage hier nach Anpfiff die finale Quote (Closing Line) des Buchmachers ein, um deinen CLV zu messen. Ändere den Status auf Gewonnen/Verloren, um die Wette abzurechnen.")
     if len(st.session_state.journal) > 0:
-        edited_journal = st.data_editor(st.session_state.journal, column_config={"Status": st.column_config.SelectboxColumn("Status", options=["Offen", "Gewonnen", "Verloren"], required=True)}, hide_index=True, use_container_width=True)
+        
+        # NEU: Closing Quote ist jetzt bearbeitbar
+        edited_journal = st.data_editor(
+            st.session_state.journal, 
+            column_config={
+                "Status": st.column_config.SelectboxColumn("Status", options=["Offen", "Gewonnen", "Verloren"], required=True),
+                "Closing Quote": st.column_config.NumberColumn("Closing Quote", format="%.2f", step=0.01)
+            }, 
+            hide_index=True, 
+            use_container_width=True
+        )
+        
         if edited_journal != st.session_state.journal:
             st.session_state.journal = edited_journal
             save_journal(st.session_state.journal)
             st.rerun()
+            
         col_btn1, col_btn2 = st.columns(2)
         with col_btn1:
             csv = pd.DataFrame(st.session_state.journal).to_csv(index=False).encode('utf-8')
