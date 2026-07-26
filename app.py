@@ -38,26 +38,36 @@ def dixon_coles_adjustment(home_goals, away_goals, lambd, mu, rho):
     elif home_goals == 1 and away_goals == 1: return 1 - rho
     else: return 1.0
 
-def calculate_match_probabilities(xg_home, xg_away, rho):
+# NEU: Integrierter Time-Decay und Live-Score
+def calculate_match_probabilities(xg_home, xg_away, rho, current_minute=0, score_home=0, score_away=0):
     prob_1, prob_x, prob_2 = 0.0, 0.0, 0.0
     prob_over_25, prob_btts = 0.0, 0.0
     prob_ah_h_minus15, prob_ah_h_plus15 = 0.0, 0.0
     prob_ah_a_minus15, prob_ah_a_plus15 = 0.0, 0.0
+    
+    # Time-Decay Faktor (Wie viel Spielzeit ist noch übrig?)
+    time_factor = max((90 - current_minute) / 90.0, 0.001)
+    rem_xg_home = xg_home * time_factor
+    rem_xg_away = xg_away * time_factor
 
-    for home_goals in range(8):
-        for away_goals in range(8):
-            prob = poisson_prob(home_goals, xg_home) * poisson_prob(away_goals, xg_away)
-            prob *= dixon_coles_adjustment(home_goals, away_goals, xg_home, xg_away, rho)
+    for added_home in range(8):
+        for added_away in range(8):
+            prob = poisson_prob(added_home, rem_xg_home) * poisson_prob(added_away, rem_xg_away)
+            prob *= dixon_coles_adjustment(added_home, added_away, rem_xg_home, rem_xg_away, rho)
             if prob < 0: prob = 0
             
-            if home_goals > away_goals: prob_1 += prob
-            elif home_goals == away_goals: prob_x += prob
+            # Reales End-Ergebnis = Aktueller Stand + restliche simulierte Tore
+            final_home = score_home + added_home
+            final_away = score_away + added_away
+            
+            if final_home > final_away: prob_1 += prob
+            elif final_home == final_away: prob_x += prob
             else: prob_2 += prob
                 
-            if (home_goals + away_goals) > 2.5: prob_over_25 += prob
-            if home_goals > 0 and away_goals > 0: prob_btts += prob
+            if (final_home + final_away) > 2.5: prob_over_25 += prob
+            if final_home > 0 and final_away > 0: prob_btts += prob
                 
-            margin = home_goals - away_goals
+            margin = final_home - final_away
             if margin >= 2: prob_ah_h_minus15 += prob
             if margin >= -1: prob_ah_h_plus15 += prob
             if margin <= -2: prob_ah_a_minus15 += prob
@@ -91,7 +101,8 @@ def reverse_engineer_odds(true_p1, true_px, true_p2, rho):
     for h in range(1, 41):
         for a in range(1, 41):
             xgh, xga = h / 10.0, a / 10.0
-            probs = calculate_match_probabilities(xgh, xga, rho)
+            # Für Pre-Match Reverse Engineering ist Minute=0 und Score=0:0
+            probs = calculate_match_probabilities(xgh, xga, rho, 0, 0, 0)
             diff = abs(probs["1"] - true_p1) + abs(probs["X"] - true_px) + abs(probs["2"] - true_p2)
             if diff < best_diff: best_diff, best_xg_h, best_xg_a = diff, xgh, xga
     return best_xg_h, best_xg_a
@@ -120,12 +131,20 @@ tab_engine, tab_reverse, tab_journal = st.tabs(["⚙️ Engine", "🕵️ Revers
 
 # --- TAB 1: ENGINE ---
 with tab_engine:
-    col1, col2 = st.columns(2)
+    st.markdown("### 1. Match-Analyse ($xG$ & Live-Status)")
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1: xg_home = st.number_input("Tore Heim ($xG$)", min_value=0.1, max_value=5.0, value=1.5, step=0.1)
-    with col2: xg_away = st.number_input("Tore Auswärts ($xG$)", min_value=0.1, max_value=5.0, value=1.1, step=0.1)
+    with col2: xg_away = st.number_input("Tore Ausw. ($xG$)", min_value=0.1, max_value=5.0, value=1.1, step=0.1)
+    with col3: live_min = st.number_input("Minute", min_value=0, max_value=90, value=0, step=1)
+    with col4: live_sh = st.number_input("Stand Heim", min_value=0, max_value=10, value=0, step=1)
+    with col5: live_sa = st.number_input("Stand Ausw.", min_value=0, max_value=10, value=0, step=1)
     
-    probs = calculate_match_probabilities(xg_home, xg_away, rho)
+    probs = calculate_match_probabilities(xg_home, xg_away, rho, live_min, live_sh, live_sa)
+    
     st.markdown("---")
+    if live_min > 0:
+        st.info(f"⏱️ **Live-Modus aktiv:** Engine berechnet Restspielzeit ab der {live_min}. Minute beim Stand von {live_sh}:{live_sa}.")
+        
     st.subheader("💡 Faire Modell-Quoten")
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("1", format_odds(probs["1"]))
@@ -149,7 +168,7 @@ with tab_engine:
         st.success(f"✅ Positiver EV: **+{round(ev * 100, 2)}%** | Einsatz: **{round(bet_size, 2)} €**")
         with st.expander("Wette ins Journal übernehmen"):
             match_name = st.text_input("Spiel (z.B. Sparta Prag - Brünn)")
-            market_name = st.text_input("Tipp (z.B. Heim -1.5)") # Wichtig für die Analytics!
+            market_name = st.text_input("Tipp (z.B. Heim -1.5)")
             if st.button("Ins Journal eintragen (Cloud Sync)"):
                 st.session_state.journal.append({"Spiel": match_name, "Tipp": market_name, "Quote": target_odds, "Einsatz": round(bet_size, 2), "EV (%)": round(ev * 100, 2), "Status": "Offen"})
                 save_journal(st.session_state.journal)
@@ -203,7 +222,6 @@ with tab_journal:
         else:
             st.info("Werte Wetten aus, um den Chart zu sehen.")
 
-    # --- NEU: PORTFOLIO ANALYTICS ---
     with col_analytics:
         st.subheader("🔍 Markt-Analyse")
         if len(settled_bets) > 0:
