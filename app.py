@@ -2,6 +2,7 @@ import streamlit as st
 import math
 import pandas as pd
 import requests
+import random
 
 st.set_page_config(page_title="Quant Betting Engine", page_icon="📈", layout="wide")
 
@@ -41,7 +42,6 @@ def dixon_coles_adjustment(home_goals, away_goals, lambd, mu, rho):
     elif home_goals == 1 and away_goals == 1: return 1 - rho
     else: return 1.0
 
-# NEU: red_home und red_away als Parameter
 def calculate_match_probabilities(xg_home, xg_away, rho, zip_factor, current_minute=0, score_home=0, score_away=0, red_home=False, red_away=False):
     prob_1, prob_x, prob_2, prob_over_25, prob_btts = 0.0, 0.0, 0.0, 0.0, 0.0
     prob_ah_h_minus15, prob_ah_h_plus15, prob_ah_a_minus15, prob_ah_a_plus15 = 0.0, 0.0, 0.0, 0.0
@@ -49,15 +49,13 @@ def calculate_match_probabilities(xg_home, xg_away, rho, zip_factor, current_min
     time_factor = max((90 - current_minute) / 90.0, 0.001)
     rem_xg_home, rem_xg_away = xg_home * time_factor, xg_away * time_factor
 
-    # In-Play Shock Multiplikator (Rote Karten)
     if red_home and not red_away:
-        rem_xg_home *= 0.60  # Heim generiert 40% weniger xG
-        rem_xg_away *= 1.35  # Auswärts bekommt 35% mehr xG (Überzahl)
+        rem_xg_home *= 0.60
+        rem_xg_away *= 1.35
     elif red_away and not red_home:
         rem_xg_away *= 0.60
         rem_xg_home *= 1.35
     elif red_home and red_away:
-        # Beide in Unterzahl (10v10) = Mehr Platz auf dem Feld, leichte Torerhöhung für beide
         rem_xg_home *= 1.10
         rem_xg_away *= 1.10
 
@@ -143,7 +141,7 @@ for bet in st.session_state.journal:
     if bet['Status'] == 'Gewonnen': current_bankroll += bet['Einsatz'] * bet['Quote']
     if bet['Status'] == 'Offen': exposure += bet['Einsatz']
 
-tab_engine, tab_reverse, tab_journal = st.tabs(["⚙️ Engine", "🕵️ Reverse", "📖 Portfolio & CLV"])
+tab_engine, tab_reverse, tab_journal = st.tabs(["⚙️ Engine", "🕵️ Reverse", "📖 Portfolio & Analytics"])
 
 # --- TAB 1: ENGINE ---
 with tab_engine:
@@ -185,8 +183,7 @@ with tab_engine:
     probs = calculate_match_probabilities(xg_home, xg_away, rho, zip_factor, live_min, live_sh, live_sa, red_h, red_a)
         
     st.subheader("💡 Faire Modell-Quoten")
-    if red_h or red_a:
-        st.info("⚠️ **Achtung:** Quoten wurden durch Rote Karten dynamisch angepasst!")
+    if red_h or red_a: st.info("⚠️ **Achtung:** Quoten wurden durch Rote Karten dynamisch angepasst!")
         
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("1", format_odds(probs["1"]))
@@ -276,21 +273,63 @@ with tab_journal:
     kpi5.metric("Ø CLV", f"{avg_clv:+.2f} %")
 
     st.markdown("---")
-    col_chart, col_analytics = st.columns([1.5, 1])
-    with col_chart:
-        st.subheader("📈 Bankroll Entwicklung")
-        if len(settled_bets) > 0:
-            history, temp_bankroll = [start_bankroll], start_bankroll
-            for bet in settled_bets:
-                temp_bankroll -= bet['Einsatz']
-                if bet['Status'] == 'Gewonnen': temp_bankroll += bet['Einsatz'] * bet['Quote']
-                history.append(temp_bankroll)
-            st.line_chart(pd.DataFrame(history, columns=["Bankroll (€)"]), height=250)
     
-    with col_analytics:
-        st.subheader("🔍 Markt-Analyse")
-        if len(settled_bets) > 0:
-            df_settled = pd.DataFrame(settled_bets)
+    # NEU: MONTE CARLO SIMULATION
+    st.subheader("🔮 Monte Carlo Stresstest (Zukunfts-Simulation)")
+    if len(settled_bets) >= 5:
+        st.write("Die App hat deine bisherigen Ergebnisse analysiert und simuliert jetzt **50 parallele Universen**, in denen du jeweils **100 weitere Wetten** mit deiner aktuellen Hitrate platzierst.")
+        
+        # Historische Profit-Ergebnisse extrahieren
+        profits = []
+        for b in settled_bets:
+            if b['Status'] == 'Gewonnen':
+                profits.append(b['Einsatz'] * b['Quote'] - b['Einsatz'])
+            else:
+                profits.append(-b['Einsatz'])
+        
+        # 50 Pfade, 100 Wetten in die Zukunft simulieren (Bootstrapping)
+        simulations = []
+        ruin_count = 0
+        
+        for _ in range(50):
+            path = [current_bankroll]
+            is_ruined = False
+            for _ in range(100):
+                next_bankroll = path[-1] + random.choice(profits)
+                if next_bankroll <= 0:
+                    next_bankroll = 0
+                    is_ruined = True
+                path.append(next_bankroll)
+            if is_ruined: ruin_count += 1
+            simulations.append(path)
+            
+        df_sim = pd.DataFrame(simulations).T
+        
+        # Metriken berechnen
+        ror = (ruin_count / 50) * 100
+        median_end = df_sim.iloc[-1].median()
+        
+        c_mc1, c_mc2, c_mc3 = st.columns(3)
+        c_mc1.metric("Risk of Ruin (Pleite-Risiko)", f"{ror:.1f} %", delta="Ziel: < 5%", delta_color="inverse")
+        c_mc2.metric("Erwartete Bankroll (Median)", f"{median_end:.2f} €")
+        
+        # Finde den besten und schlechtesten Verlauf (ohne 0)
+        best_case = df_sim.iloc[-1].max()
+        c_mc3.metric("Best Case Szenario", f"{best_case:.2f} €")
+        
+        # Den extrem technischen "Spaghetti-Chart" zeichnen
+        st.line_chart(df_sim, height=300)
+    else:
+        st.info("⚠️ Du brauchst mindestens **5 abgerechnete Wetten (Gewonnen/Verloren)** im Journal, damit die Monte-Carlo-Simulation genug Daten hat, um deine Zukunft zu berechnen.")
+
+
+    st.markdown("---")
+    st.subheader("🔍 Markt-Analyse")
+    if len(settled_bets) > 0:
+        df_settled = pd.DataFrame(settled_bets)
+        col_m1, col_m2 = st.columns(2)
+        
+        with col_m1:
             market_stats = []
             for market in df_settled['Tipp'].unique():
                 m_bets = df_settled[df_settled['Tipp'] == market]
@@ -299,11 +338,10 @@ with tab_journal:
                 profit, m_roi = returned - invested, (returned - invested) / invested * 100 if invested > 0 else 0
                 m_clv_list = [((r['Quote'] / r['Closing Quote']) - 1) * 100 for _, r in m_bets.iterrows() if pd.notna(r.get('Closing Quote')) and float(r.get('Closing Quote', 0)) > 0]
                 m_avg_clv = sum(m_clv_list) / len(m_clv_list) if m_clv_list else 0.0
-                market_stats.append({"Markt": market, "Wetten": count, "Profit (€)": round(profit, 2), "ROI (%)": round(m_roi, 1), "Ø CLV (%)": round(m_avg_clv, 2)})
-            st.dataframe(pd.DataFrame(market_stats).sort_values(by="Profit (€)", ascending=False), hide_index=True, use_container_width=True)
+                market_stats.append({"Markt": market, "Wetten": count, "Profit": round(profit, 2), "ROI (%)": round(m_roi, 1), "Ø CLV (%)": round(m_avg_clv, 2)})
+            st.dataframe(pd.DataFrame(market_stats).sort_values(by="Profit", ascending=False), hide_index=True, use_container_width=True)
             
-            st.markdown("---")
-            st.subheader("🌍 Ligen-Analyse")
+        with col_m2:
             league_stats = []
             for league in df_settled['Liga'].unique():
                 l_bets = df_settled[df_settled['Liga'] == league]
@@ -312,8 +350,8 @@ with tab_journal:
                 profit, l_roi = returned - invested, (returned - invested) / invested * 100 if invested > 0 else 0
                 l_clv_list = [((r['Quote'] / r['Closing Quote']) - 1) * 100 for _, r in l_bets.iterrows() if pd.notna(r.get('Closing Quote')) and float(r.get('Closing Quote', 0)) > 0]
                 l_avg_clv = sum(l_clv_list) / len(l_clv_list) if l_clv_list else 0.0
-                league_stats.append({"Liga": league, "Wetten": count, "Profit (€)": round(profit, 2), "ROI (%)": round(l_roi, 1), "Ø CLV (%)": round(l_avg_clv, 2)})
-            st.dataframe(pd.DataFrame(league_stats).sort_values(by="Profit (€)", ascending=False), hide_index=True, use_container_width=True)
+                league_stats.append({"Liga": league, "Wetten": count, "Profit": round(profit, 2), "ROI (%)": round(l_roi, 1), "Ø CLV (%)": round(l_avg_clv, 2)})
+            st.dataframe(pd.DataFrame(league_stats).sort_values(by="Profit", ascending=False), hide_index=True, use_container_width=True)
 
     st.markdown("---")
     st.subheader("📋 Wett-Historie & CLV-Eingabe")
