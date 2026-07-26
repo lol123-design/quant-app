@@ -1,12 +1,41 @@
 import streamlit as st
 import math
 import pandas as pd
+import requests
 
-# --- SESSION STATE (Das Gedächtnis) ---
+st.set_page_config(page_title="Quant Betting Engine", page_icon="📈", layout="wide")
+
+# --- DATENBANK FUNKTIONEN (JSONBin) ---
+BIN_ID = st.secrets["BIN_ID"]
+API_KEY = st.secrets["API_KEY"]
+JSONBIN_URL = f"https://api.jsonbin.io/v3/b/{BIN_ID}"
+
+def load_journal():
+    headers = {"X-Master-Key": API_KEY}
+    try:
+        req = requests.get(JSONBIN_URL, headers=headers)
+        if req.status_code == 200:
+            data = req.json()
+            return data.get("record", {}).get("data", [])
+        return []
+    except:
+        return []
+
+def save_journal(journal_data):
+    headers = {
+        "Content-Type": "application/json",
+        "X-Master-Key": API_KEY
+    }
+    try:
+        requests.put(JSONBIN_URL, json={"data": journal_data}, headers=headers)
+    except:
+        pass
+
+# --- SESSION STATE (Gedächtnis aus DB laden) ---
 if 'journal' not in st.session_state:
-    st.session_state.journal = []
+    st.session_state.journal = load_journal()
 
-# --- FUNKTIONEN ---
+# --- ENGINE FUNKTIONEN ---
 def poisson_prob(k, lambd):
     return (lambd**k * math.exp(-lambd)) / math.factorial(k)
 
@@ -65,32 +94,26 @@ def calculate_kelly(prob, odds, fraction=0.25):
 def format_odds(prob):
     return round(1 / prob, 2) if prob > 0 else 0.0
 
-# NEU: Reverse Engineering Funktionen
 def get_true_probabilities(odds_1, odds_x, odds_2):
-    i1 = 1 / odds_1
-    ix = 1 / odds_x
-    i2 = 1 / odds_2
+    i1, ix, i2 = 1 / odds_1, 1 / odds_x, 1 / odds_2
     vig = i1 + ix + i2
     return i1 / vig, ix / vig, i2 / vig, vig
 
 def reverse_engineer_odds(true_p1, true_px, true_p2, rho):
     best_diff = 999.0
     best_xg_h, best_xg_a = 1.0, 1.0
-    # Die App simuliert 1600 mögliche xG-Kombinationen in Bruchteilen einer Sekunde
     for h in range(1, 41):
         for a in range(1, 41):
             xgh, xga = h / 10.0, a / 10.0
             probs = calculate_match_probabilities(xgh, xga, rho)
             diff = abs(probs["1"] - true_p1) + abs(probs["X"] - true_px) + abs(probs["2"] - true_p2)
             if diff < best_diff:
-                best_diff = diff
-                best_xg_h, best_xg_a = xgh, xga
+                best_diff, best_xg_h, best_xg_a = diff, xgh, xga
     return best_xg_h, best_xg_a
 
 
 # --- APP UI ---
-st.set_page_config(page_title="Quant Betting Engine", page_icon="📈", layout="wide")
-st.title("📈 Pro Quant Engine v6.0")
+st.title("📈 Pro Quant Engine (Cloud Sync)")
 
 # --- SIDEBAR ---
 st.sidebar.header("🏦 Start-Kapital")
@@ -108,7 +131,7 @@ for bet in st.session_state.journal:
     if bet['Status'] == 'Offen': exposure += bet['Einsatz']
 
 # --- TABS LAYOUT ---
-tab_engine, tab_reverse, tab_journal = st.tabs(["⚙️ Vorwärts-Engine", "🕵️ Reverse Markt-Analyse", "📖 Portfolio & Journal"])
+tab_engine, tab_reverse, tab_journal = st.tabs(["⚙️ Engine", "🕵️ Reverse", "📖 Portfolio"])
 
 # --- TAB 1: ENGINE ---
 with tab_engine:
@@ -143,16 +166,15 @@ with tab_engine:
         with st.expander("Wette ins Journal übernehmen"):
             match_name = st.text_input("Spiel (z.B. Sparta Prag - Brünn)")
             market_name = st.text_input("Tipp (z.B. Heim 1)")
-            if st.button("Ins Journal eintragen"):
+            if st.button("Ins Journal eintragen (Cloud Sync)"):
                 st.session_state.journal.append({"Spiel": match_name, "Tipp": market_name, "Quote": target_odds, "Einsatz": round(bet_size, 2), "EV (%)": round(ev * 100, 2), "Status": "Offen"})
+                save_journal(st.session_state.journal) # Speichern in DB!
                 st.rerun()
     else: st.error(f"❌ Negativer EV: **{round(ev * 100, 2)}%**. Kein Value.")
 
 # --- TAB 2: REVERSE ENGINEERING ---
 with tab_reverse:
     st.header("🕵️ Buchmacher entschlüsseln")
-    st.markdown("Gib die 1X2-Quoten des Buchmachers ein. Die KI berechnet, mit welchen $xG$-Werten der Markt kalkuliert.")
-    
     r_col1, r_col2, r_col3 = st.columns(3)
     with r_col1: b_odd1 = st.number_input("Quote 1 (Heim)", min_value=1.01, value=2.50, step=0.05)
     with r_col2: b_oddx = st.number_input("Quote X (Draw)", min_value=1.01, value=3.20, step=0.05)
@@ -161,30 +183,23 @@ with tab_reverse:
     if st.button("🔍 Buchmacher entschlüsseln"):
         true_1, true_x, true_2, vig = get_true_probabilities(b_odd1, b_oddx, b_odd2)
         implied_xgh, implied_xga = reverse_engineer_odds(true_1, true_x, true_2, rho)
-        
         st.info(f"📊 **Buchmacher-Marge (Vig):** {round((vig - 1) * 100, 2)}%")
-        st.success("Erfolgreich berechnet! Der Markt erwartet folgende Performance:")
-        
         c_res1, c_res2 = st.columns(2)
         c_res1.metric("Erwartete Tore HEIM ($xG$)", f"{implied_xgh}")
         c_res2.metric("Erwartete Tore AUSWÄRTS ($xG$)", f"{implied_xga}")
-        
-        st.markdown("> **Wie du das nutzt:** Wenn du der Meinung bist, dass das Heimteam heute viel stärker ist als der vom Markt berechnete Wert von **" + str(implied_xgh) + "**, dann wechsle jetzt rüber in Tab 1, trage deinen höheren Wert ein und spiele den Heimsieg an!")
 
 # --- TAB 3: JOURNAL ---
 with tab_journal:
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     kpi1.metric("Start-Kapital", f"{start_bankroll:.2f} €")
-    kpi2.metric("Aktuelle Bankroll", f"{current_bankroll:.2f} €", f"{current_bankroll - start_bankroll:.2f} € Gewinn/Verlust")
-    kpi3.metric("Gebundenes Kapital", f"{exposure:.2f} €")
+    kpi2.metric("Aktuelle Bankroll", f"{current_bankroll:.2f} €", f"{current_bankroll - start_bankroll:.2f} € Profit")
+    kpi3.metric("Gebundenes", f"{exposure:.2f} €")
     
     settled_bets = [b for b in st.session_state.journal if b['Status'] in ['Gewonnen', 'Verloren']]
     total_invested = sum(b['Einsatz'] for b in settled_bets)
     if total_invested > 0:
-        profit = current_bankroll - start_bankroll
-        roi = (profit / total_invested) * 100
-        won_bets = len([b for b in settled_bets if b['Status'] == 'Gewonnen'])
-        hitrate = (won_bets / len(settled_bets)) * 100
+        roi = ((current_bankroll - start_bankroll) / total_invested) * 100
+        hitrate = (len([b for b in settled_bets if b['Status'] == 'Gewonnen']) / len(settled_bets)) * 100
         kpi4.metric("ROI", f"{roi:.2f} %", f"Hitrate: {hitrate:.1f}%")
     else: kpi4.metric("ROI", "0.00 %")
 
@@ -192,13 +207,15 @@ with tab_journal:
         edited_journal = st.data_editor(st.session_state.journal, column_config={"Status": st.column_config.SelectboxColumn("Status", options=["Offen", "Gewonnen", "Verloren"], required=True)}, hide_index=True, use_container_width=True)
         if edited_journal != st.session_state.journal:
             st.session_state.journal = edited_journal
+            save_journal(st.session_state.journal) # DB Update bei Statusänderung!
             st.rerun()
             
         col_btn1, col_btn2 = st.columns(2)
         with col_btn1:
             csv = pd.DataFrame(st.session_state.journal).to_csv(index=False).encode('utf-8')
-            st.download_button(label="💾 Journal als CSV sichern", data=csv, file_name='quant_journal_backup.csv', mime='text/csv')
+            st.download_button("💾 Als CSV Backup laden", data=csv, file_name='quant_journal.csv', mime='text/csv')
         with col_btn2:
-            if st.button("🗑️ Journal komplett löschen"):
+            if st.button("🗑️ Journal löschen"):
                 st.session_state.journal = []
+                save_journal([]) # DB wird geleert!
                 st.rerun()
