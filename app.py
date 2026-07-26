@@ -29,8 +29,15 @@ if 'journal' not in st.session_state:
         if "Closing Quote" not in bet: bet["Closing Quote"] = bet.get("Quote", 0.0)
     st.session_state.journal = loaded_data
 
-def poisson_prob(k, lambd):
-    return (lambd**k * math.exp(-lambd)) / math.factorial(k)
+# NEU: Das Zero-Inflated Poisson (ZIP) Modell
+def zip_poisson(k, lambd, zip_factor):
+    p = (lambd**k * math.exp(-lambd)) / math.factorial(k)
+    # Wenn k=0 (kein Tor), greift die Zero-Inflation (künstliche Anhebung)
+    if k == 0:
+        return zip_factor + (1 - zip_factor) * p
+    # Alle anderen Tore werden minimal abgesenkt, damit die Summe 100% bleibt
+    else:
+        return (1 - zip_factor) * p
 
 def dixon_coles_adjustment(home_goals, away_goals, lambd, mu, rho):
     if home_goals == 0 and away_goals == 0: return 1 - (lambd * mu * rho)
@@ -39,7 +46,7 @@ def dixon_coles_adjustment(home_goals, away_goals, lambd, mu, rho):
     elif home_goals == 1 and away_goals == 1: return 1 - rho
     else: return 1.0
 
-def calculate_match_probabilities(xg_home, xg_away, rho, current_minute=0, score_home=0, score_away=0):
+def calculate_match_probabilities(xg_home, xg_away, rho, zip_factor, current_minute=0, score_home=0, score_away=0):
     prob_1, prob_x, prob_2, prob_over_25, prob_btts = 0.0, 0.0, 0.0, 0.0, 0.0
     prob_ah_h_minus15, prob_ah_h_plus15, prob_ah_a_minus15, prob_ah_a_plus15 = 0.0, 0.0, 0.0, 0.0
     
@@ -48,7 +55,8 @@ def calculate_match_probabilities(xg_home, xg_away, rho, current_minute=0, score
 
     for added_home in range(8):
         for added_away in range(8):
-            prob = poisson_prob(added_home, rem_xg_home) * poisson_prob(added_away, rem_xg_away)
+            # Verwendung der neuen ZIP-Logik statt purem Poisson
+            prob = zip_poisson(added_home, rem_xg_home, zip_factor) * zip_poisson(added_away, rem_xg_away, zip_factor)
             prob *= dixon_coles_adjustment(added_home, added_away, rem_xg_home, rem_xg_away, rho)
             if prob < 0: prob = 0
             
@@ -89,12 +97,12 @@ def get_true_probabilities(odds_1, odds_x, odds_2):
     vig = i1 + ix + i2
     return i1 / vig, ix / vig, i2 / vig, vig
 
-def reverse_engineer_odds(true_p1, true_px, true_p2, rho):
+def reverse_engineer_odds(true_p1, true_px, true_p2, rho, zip_factor):
     best_diff, best_xg_h, best_xg_a = 999.0, 1.0, 1.0
     for h in range(1, 41):
         for a in range(1, 41):
             xgh, xga = h / 10.0, a / 10.0
-            probs = calculate_match_probabilities(xgh, xga, rho, 0, 0, 0)
+            probs = calculate_match_probabilities(xgh, xga, rho, zip_factor, 0, 0, 0)
             diff = abs(probs["1"] - true_p1) + abs(probs["X"] - true_px) + abs(probs["2"] - true_p2)
             if diff < best_diff: best_diff, best_xg_h, best_xg_a = diff, xgh, xga
     return best_xg_h, best_xg_a
@@ -115,11 +123,12 @@ kelly_fraction = st.sidebar.select_slider(
     value=0.25, 
     format_func=lambda x: f"{int(1/x)}/1 Kelly (Defensiv)" if x == 0.125 else (f"{int(1/x)}/1 Kelly (Standard)" if x == 0.25 else (f"{int(1/x)}/1 Kelly (Aggressiv)" if x == 0.5 else "Full Kelly (Wahnsinn)"))
 )
-# NEU: Simultan-Wetten Counter
-parallel_bets = st.sidebar.number_input("Anzahl paralleler Wetten", min_value=1, max_value=20, value=1, step=1, help="Wenn du z.B. 3 Spiele gleichzeitig um 15:30 Uhr spielst, stell das auf 3. Das System teilt dein Risiko automatisch auf, um dich vor Totalverlusten zu schützen.")
+parallel_bets = st.sidebar.number_input("Anzahl paralleler Wetten", min_value=1, max_value=20, value=1, step=1)
 max_risk_pct = st.sidebar.slider("Max. Einsatz pro Wette (%)", min_value=1.0, max_value=10.0, value=5.0, step=0.5)
 
 st.sidebar.header("⚙️ Engine Settings")
+# NEU: Der ZIP-Regler
+zip_factor = st.sidebar.slider("ZIP-Faktor (0:0 Boost)", min_value=0.00, max_value=0.20, value=0.05, step=0.01, help="Künstliche Erhöhung der Wahrscheinlichkeit für 0 Tore. Kompensiert die Schwäche von Poisson bei Unentschieden.")
 rho = st.sidebar.slider("Dixon-Coles Faktor", min_value=-0.30, max_value=0.00, value=-0.15, step=0.01)
 
 current_bankroll, exposure = start_bankroll, 0.0
@@ -162,9 +171,9 @@ with tab_engine:
         with col_l2: live_sh = st.number_input("Stand Heim", min_value=0, max_value=10, value=0, step=1)
         with col_l3: live_sa = st.number_input("Stand Ausw.", min_value=0, max_value=10, value=0, step=1)
     
-    probs = calculate_match_probabilities(xg_home, xg_away, rho, live_min, live_sh, live_sa)
+    probs = calculate_match_probabilities(xg_home, xg_away, rho, zip_factor, live_min, live_sh, live_sa)
         
-    st.subheader("💡 Faire Modell-Quoten")
+    st.subheader("💡 Faire Modell-Quoten (ZIP Aktiviert)")
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("1", format_odds(probs["1"]))
     c2.metric("X", format_odds(probs["X"]))
@@ -179,8 +188,6 @@ with tab_engine:
     with col_input2: target_odds = st.number_input("Buchmacher-Quote", min_value=1.01, value=2.00, step=0.05)
 
     ev = calculate_ev(target_prob_input / 100.0, target_odds)
-    
-    # NEU: Kelly wird durch die Anzahl der parallelen Wetten geteilt (Diversifikations-Faktor)
     effective_kelly = kelly_fraction / parallel_bets
     raw_kelly_bet = current_bankroll * calculate_kelly(target_prob_input / 100.0, target_odds, fraction=effective_kelly)
     max_allowed_bet = current_bankroll * (max_risk_pct / 100.0)
@@ -194,10 +201,8 @@ with tab_engine:
 
     if ev > 0:
         st.success(f"✅ Positiver EV: **+{round(ev * 100, 2)}%** | Empfohlener Einsatz: **{round(bet_size, 2)} €**")
-        if parallel_bets > 1:
-            st.info(f"🔄 Einsatz wurde für **{parallel_bets} parallele Wetten** angepasst, um dein Gesamt-Risiko zu schützen.")
-        if is_capped: 
-            st.warning(f"⚠️ Einsatz wurde durch dein Sicherheits-Limit ({max_risk_pct}%) gedeckelt.")
+        if parallel_bets > 1: st.info(f"🔄 Einsatz wurde für **{parallel_bets} parallele Wetten** angepasst.")
+        if is_capped: st.warning(f"⚠️ Einsatz wurde durch dein Sicherheits-Limit ({max_risk_pct}%) gedeckelt.")
 
         with st.expander("Wette ins Journal übernehmen"):
             c_j1, c_j2, c_j3 = st.columns(3)
@@ -230,13 +235,13 @@ with tab_reverse:
     with r_col3: b_odd2 = st.number_input("Quote 2 (Auswärts)", min_value=1.01, value=2.80, step=0.05)
     if st.button("🔍 Buchmacher entschlüsseln"):
         true_1, true_x, true_2, vig = get_true_probabilities(b_odd1, b_oddx, b_odd2)
-        implied_xgh, implied_xga = reverse_engineer_odds(true_1, true_x, true_2, rho)
+        implied_xgh, implied_xga = reverse_engineer_odds(true_1, true_x, true_2, rho, zip_factor)
         st.info(f"📊 **Buchmacher-Marge (Vig):** {round((vig - 1) * 100, 2)}%")
         c_res1, c_res2 = st.columns(2)
         c_res1.metric("Erwartete Tore HEIM ($xG$)", f"{implied_xgh}")
         c_res2.metric("Erwartete Tore AUSWÄRTS ($xG$)", f"{implied_xga}")
 
-# --- TAB 3: JOURNAL & DASHBOARD ---
+# --- TAB 3: JOURNAL & DASHBOARD (bleibt exakt identisch) ---
 with tab_journal:
     kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
     kpi1.metric("Start-Kapital", f"{start_bankroll:.2f} €")
@@ -298,7 +303,6 @@ with tab_journal:
 
     st.markdown("---")
     st.subheader("📋 Wett-Historie & CLV-Eingabe")
-    st.info("Trage hier nach Anpfiff die finale Quote (Closing Line) des Buchmachers ein, um deinen CLV zu messen. Ändere den Status auf Gewonnen/Verloren, um die Wette abzurechnen.")
     if len(st.session_state.journal) > 0:
         edited_journal = st.data_editor(
             st.session_state.journal, 
