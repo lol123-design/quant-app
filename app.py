@@ -29,15 +29,10 @@ if 'journal' not in st.session_state:
         if "Closing Quote" not in bet: bet["Closing Quote"] = bet.get("Quote", 0.0)
     st.session_state.journal = loaded_data
 
-# NEU: Das Zero-Inflated Poisson (ZIP) Modell
 def zip_poisson(k, lambd, zip_factor):
     p = (lambd**k * math.exp(-lambd)) / math.factorial(k)
-    # Wenn k=0 (kein Tor), greift die Zero-Inflation (künstliche Anhebung)
-    if k == 0:
-        return zip_factor + (1 - zip_factor) * p
-    # Alle anderen Tore werden minimal abgesenkt, damit die Summe 100% bleibt
-    else:
-        return (1 - zip_factor) * p
+    if k == 0: return zip_factor + (1 - zip_factor) * p
+    else: return (1 - zip_factor) * p
 
 def dixon_coles_adjustment(home_goals, away_goals, lambd, mu, rho):
     if home_goals == 0 and away_goals == 0: return 1 - (lambd * mu * rho)
@@ -46,16 +41,28 @@ def dixon_coles_adjustment(home_goals, away_goals, lambd, mu, rho):
     elif home_goals == 1 and away_goals == 1: return 1 - rho
     else: return 1.0
 
-def calculate_match_probabilities(xg_home, xg_away, rho, zip_factor, current_minute=0, score_home=0, score_away=0):
+# NEU: red_home und red_away als Parameter
+def calculate_match_probabilities(xg_home, xg_away, rho, zip_factor, current_minute=0, score_home=0, score_away=0, red_home=False, red_away=False):
     prob_1, prob_x, prob_2, prob_over_25, prob_btts = 0.0, 0.0, 0.0, 0.0, 0.0
     prob_ah_h_minus15, prob_ah_h_plus15, prob_ah_a_minus15, prob_ah_a_plus15 = 0.0, 0.0, 0.0, 0.0
     
     time_factor = max((90 - current_minute) / 90.0, 0.001)
     rem_xg_home, rem_xg_away = xg_home * time_factor, xg_away * time_factor
 
+    # In-Play Shock Multiplikator (Rote Karten)
+    if red_home and not red_away:
+        rem_xg_home *= 0.60  # Heim generiert 40% weniger xG
+        rem_xg_away *= 1.35  # Auswärts bekommt 35% mehr xG (Überzahl)
+    elif red_away and not red_home:
+        rem_xg_away *= 0.60
+        rem_xg_home *= 1.35
+    elif red_home and red_away:
+        # Beide in Unterzahl (10v10) = Mehr Platz auf dem Feld, leichte Torerhöhung für beide
+        rem_xg_home *= 1.10
+        rem_xg_away *= 1.10
+
     for added_home in range(8):
         for added_away in range(8):
-            # Verwendung der neuen ZIP-Logik statt purem Poisson
             prob = zip_poisson(added_home, rem_xg_home, zip_factor) * zip_poisson(added_away, rem_xg_away, zip_factor)
             prob *= dixon_coles_adjustment(added_home, added_away, rem_xg_home, rem_xg_away, rho)
             if prob < 0: prob = 0
@@ -127,8 +134,7 @@ parallel_bets = st.sidebar.number_input("Anzahl paralleler Wetten", min_value=1,
 max_risk_pct = st.sidebar.slider("Max. Einsatz pro Wette (%)", min_value=1.0, max_value=10.0, value=5.0, step=0.5)
 
 st.sidebar.header("⚙️ Engine Settings")
-# NEU: Der ZIP-Regler
-zip_factor = st.sidebar.slider("ZIP-Faktor (0:0 Boost)", min_value=0.00, max_value=0.20, value=0.05, step=0.01, help="Künstliche Erhöhung der Wahrscheinlichkeit für 0 Tore. Kompensiert die Schwäche von Poisson bei Unentschieden.")
+zip_factor = st.sidebar.slider("ZIP-Faktor (0:0 Boost)", min_value=0.00, max_value=0.20, value=0.05, step=0.01)
 rho = st.sidebar.slider("Dixon-Coles Faktor", min_value=-0.30, max_value=0.00, value=-0.15, step=0.01)
 
 current_bankroll, exposure = start_bankroll, 0.0
@@ -165,15 +171,23 @@ with tab_engine:
         st.success(f"🤖 **Generierte Stärke (Proxy-$xG$):** Heim **{round(xg_home, 2)}** | Auswärts **{round(xg_away, 2)}**")
 
     st.markdown("---")
-    with st.expander("⏱️ Live-Wetten Modus aktivieren (Optional)"):
+    with st.expander("⏱️ Live-Wetten Modus & Rote Karten aktivieren"):
         col_l1, col_l2, col_l3 = st.columns(3)
         with col_l1: live_min = st.number_input("Minute", min_value=0, max_value=90, value=0, step=1)
         with col_l2: live_sh = st.number_input("Stand Heim", min_value=0, max_value=10, value=0, step=1)
         with col_l3: live_sa = st.number_input("Stand Ausw.", min_value=0, max_value=10, value=0, step=1)
-    
-    probs = calculate_match_probabilities(xg_home, xg_away, rho, zip_factor, live_min, live_sh, live_sa)
         
-    st.subheader("💡 Faire Modell-Quoten (ZIP Aktiviert)")
+        st.markdown("🚨 **In-Play Schock-Events**")
+        col_rc1, col_rc2 = st.columns(2)
+        with col_rc1: red_h = st.checkbox("🟥 Heimteam in Unterzahl")
+        with col_rc2: red_a = st.checkbox("🟥 Auswärtsteam in Unterzahl")
+    
+    probs = calculate_match_probabilities(xg_home, xg_away, rho, zip_factor, live_min, live_sh, live_sa, red_h, red_a)
+        
+    st.subheader("💡 Faire Modell-Quoten")
+    if red_h or red_a:
+        st.info("⚠️ **Achtung:** Quoten wurden durch Rote Karten dynamisch angepasst!")
+        
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("1", format_odds(probs["1"]))
     c2.metric("X", format_odds(probs["X"]))
@@ -241,7 +255,7 @@ with tab_reverse:
         c_res1.metric("Erwartete Tore HEIM ($xG$)", f"{implied_xgh}")
         c_res2.metric("Erwartete Tore AUSWÄRTS ($xG$)", f"{implied_xga}")
 
-# --- TAB 3: JOURNAL & DASHBOARD (bleibt exakt identisch) ---
+# --- TAB 3: JOURNAL & DASHBOARD ---
 with tab_journal:
     kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
     kpi1.metric("Start-Kapital", f"{start_bankroll:.2f} €")
