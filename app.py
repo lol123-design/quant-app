@@ -2,7 +2,7 @@ import streamlit as st
 import math
 import pandas as pd
 
-# --- SESSION STATE (Das Gedächtnis der App) ---
+# --- SESSION STATE (Das Gedächtnis) ---
 if 'journal' not in st.session_state:
     st.session_state.journal = []
 
@@ -43,49 +43,63 @@ def calculate_match_probabilities(xg_home, xg_away, rho):
             if margin <= 1: prob_ah_a_plus15 += prob
 
     total_prob = prob_1 + prob_x + prob_2
-    p1 = prob_1 / total_prob
-    px = prob_x / total_prob
-    p2 = prob_2 / total_prob
+    p1, px, p2 = prob_1 / total_prob, prob_x / total_prob, prob_2 / total_prob
     
-    # Draw No Bet Berechnung (Ausklammern des Unentschiedens)
-    dnb_1 = p1 / (p1 + p2) if (p1 + p2) > 0 else 0
-    dnb_2 = p2 / (p1 + p2) if (p1 + p2) > 0 else 0
-
     return {
         "1": p1, "X": px, "2": p2,
         "Over25": prob_over_25, "BTTS": prob_btts,
         "AH_H_minus15": prob_ah_h_minus15, "AH_H_plus15": prob_ah_h_plus15,
         "AH_A_minus15": prob_ah_a_minus15, "AH_A_plus15": prob_ah_a_plus15,
         "1X": p1 + px, "X2": p2 + px, "12": p1 + p2,
-        "DNB1": dnb_1, "DNB2": dnb_2
+        "DNB1": p1 / (p1 + p2) if (p1 + p2) > 0 else 0,
+        "DNB2": p2 / (p1 + p2) if (p1 + p2) > 0 else 0
     }
 
 def calculate_ev(prob, odds):
     return (prob * odds) - 1
 
 def calculate_kelly(prob, odds, fraction=0.25):
-    kelly_full = (prob * (odds - 1) - (1 - prob)) / (odds - 1)
-    if kelly_full < 0: return 0
-    return kelly_full * fraction
+    k = (prob * (odds - 1) - (1 - prob)) / (odds - 1)
+    return k * fraction if k > 0 else 0
 
 def format_odds(prob):
-    if prob <= 0: return 0.0
-    return round(1 / prob, 2)
+    return round(1 / prob, 2) if prob > 0 else 0.0
+
+# NEU: Reverse Engineering Funktionen
+def get_true_probabilities(odds_1, odds_x, odds_2):
+    i1 = 1 / odds_1
+    ix = 1 / odds_x
+    i2 = 1 / odds_2
+    vig = i1 + ix + i2
+    return i1 / vig, ix / vig, i2 / vig, vig
+
+def reverse_engineer_odds(true_p1, true_px, true_p2, rho):
+    best_diff = 999.0
+    best_xg_h, best_xg_a = 1.0, 1.0
+    # Die App simuliert 1600 mögliche xG-Kombinationen in Bruchteilen einer Sekunde
+    for h in range(1, 41):
+        for a in range(1, 41):
+            xgh, xga = h / 10.0, a / 10.0
+            probs = calculate_match_probabilities(xgh, xga, rho)
+            diff = abs(probs["1"] - true_p1) + abs(probs["X"] - true_px) + abs(probs["2"] - true_p2)
+            if diff < best_diff:
+                best_diff = diff
+                best_xg_h, best_xg_a = xgh, xga
+    return best_xg_h, best_xg_a
 
 
 # --- APP UI ---
 st.set_page_config(page_title="Quant Betting Engine", page_icon="📈", layout="wide")
-st.title("📈 Pro Quant Engine v5.0")
+st.title("📈 Pro Quant Engine v6.0")
 
 # --- SIDEBAR ---
 st.sidebar.header("🏦 Start-Kapital")
 start_bankroll = st.sidebar.number_input("Initiale Bankroll (€)", min_value=1.0, value=10.0, step=0.5)
 min_bet = st.sidebar.number_input("Mindesteinsatz (€)", min_value=0.1, value=0.5, step=0.1)
-
 st.sidebar.header("⚙️ Engine Settings")
 rho = st.sidebar.slider("Dixon-Coles Faktor", min_value=-0.30, max_value=0.00, value=-0.15, step=0.01)
 
-# --- BERECHNUNG AKTUELLE BANKROLL ---
+# --- BANKROLL UPDATE ---
 current_bankroll = start_bankroll
 exposure = 0.0
 for bet in st.session_state.journal:
@@ -94,18 +108,17 @@ for bet in st.session_state.journal:
     if bet['Status'] == 'Offen': exposure += bet['Einsatz']
 
 # --- TABS LAYOUT ---
-tab_engine, tab_journal = st.tabs(["⚙️ Quant Engine", "📖 Portfolio & Journal"])
+tab_engine, tab_reverse, tab_journal = st.tabs(["⚙️ Vorwärts-Engine", "🕵️ Reverse Markt-Analyse", "📖 Portfolio & Journal"])
 
+# --- TAB 1: ENGINE ---
 with tab_engine:
-    st.header("1. Match-Analyse ($xG$)")
     col1, col2 = st.columns(2)
     with col1: xg_home = st.number_input("Tore Heim ($xG$)", min_value=0.1, max_value=5.0, value=1.5, step=0.1)
     with col2: xg_away = st.number_input("Tore Auswärts ($xG$)", min_value=0.1, max_value=5.0, value=1.1, step=0.1)
-
+    
     probs = calculate_match_probabilities(xg_home, xg_away, rho)
-
     st.markdown("---")
-    st.subheader("💡 Basis-Märkte")
+    st.subheader("💡 Faire Modell-Quoten")
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("1", format_odds(probs["1"]))
     c2.metric("X", format_odds(probs["X"]))
@@ -113,29 +126,13 @@ with tab_engine:
     c4.metric("Über 2.5", format_odds(probs["Over25"]))
     c5.metric("BTTS (Ja)", format_odds(probs["BTTS"]))
     
-    st.subheader("🛡️ Absicherung (Draw No Bet & Doppelte Chance)")
-    c10, c11, c12, c13, c14 = st.columns(5)
-    c10.metric("Heim DNB (AH 0)", format_odds(probs["DNB1"]))
-    c11.metric("Auswärts DNB (AH 0)", format_odds(probs["DNB2"]))
-    c12.metric("Heim oder X (1X)", format_odds(probs["1X"]))
-    c13.metric("Auswärts oder X (X2)", format_odds(probs["X2"]))
-    c14.metric("Kein X (12)", format_odds(probs["12"]))
-
-    st.subheader("⚖️ Asian Handicap Märkte")
-    c6, c7, c8, c9 = st.columns(4)
-    c6.metric("Heim -1.5", format_odds(probs["AH_H_minus15"]))
-    c7.metric("Heim +1.5", format_odds(probs["AH_H_plus15"]))
-    c8.metric("Auswärts -1.5", format_odds(probs["AH_A_minus15"]))
-    c9.metric("Auswärts +1.5", format_odds(probs["AH_A_plus15"]))
-
     st.markdown("---")
-    st.header("2. Value-Check & Wette einbuchen")
+    st.header("Value-Check & Wette einbuchen")
     col_input1, col_input2 = st.columns(2)
     with col_input1:
         target_prob_input = st.number_input("Modell-Wahrscheinlichkeit (%)", min_value=1.0, max_value=99.0, value=float(round(probs['1']*100, 1)), step=0.1)
         target_prob = target_prob_input / 100.0
-    with col_input2:
-        target_odds = st.number_input("Buchmacher-Quote", min_value=1.01, value=2.00, step=0.05)
+    with col_input2: target_odds = st.number_input("Buchmacher-Quote", min_value=1.01, value=2.00, step=0.05)
 
     ev = calculate_ev(target_prob, target_odds)
     bet_size = current_bankroll * calculate_kelly(target_prob, target_odds, fraction=0.25)
@@ -145,16 +142,37 @@ with tab_engine:
         st.success(f"✅ Positiver EV: **+{round(ev * 100, 2)}%** | Einsatz: **{round(bet_size, 2)} €**")
         with st.expander("Wette ins Journal übernehmen"):
             match_name = st.text_input("Spiel (z.B. Sparta Prag - Brünn)")
-            market_name = st.text_input("Tipp (z.B. Heim DNB)")
+            market_name = st.text_input("Tipp (z.B. Heim 1)")
             if st.button("Ins Journal eintragen"):
-                new_bet = {"Spiel": match_name, "Tipp": market_name, "Quote": target_odds, "Einsatz": round(bet_size, 2), "EV (%)": round(ev * 100, 2), "Status": "Offen"}
-                st.session_state.journal.append(new_bet)
+                st.session_state.journal.append({"Spiel": match_name, "Tipp": market_name, "Quote": target_odds, "Einsatz": round(bet_size, 2), "EV (%)": round(ev * 100, 2), "Status": "Offen"})
                 st.rerun()
-    else:
-        st.error(f"❌ Negativer EV: **{round(ev * 100, 2)}%**. Kein Value.")
+    else: st.error(f"❌ Negativer EV: **{round(ev * 100, 2)}%**. Kein Value.")
 
+# --- TAB 2: REVERSE ENGINEERING ---
+with tab_reverse:
+    st.header("🕵️ Buchmacher entschlüsseln")
+    st.markdown("Gib die 1X2-Quoten des Buchmachers ein. Die KI berechnet, mit welchen $xG$-Werten der Markt kalkuliert.")
+    
+    r_col1, r_col2, r_col3 = st.columns(3)
+    with r_col1: b_odd1 = st.number_input("Quote 1 (Heim)", min_value=1.01, value=2.50, step=0.05)
+    with r_col2: b_oddx = st.number_input("Quote X (Draw)", min_value=1.01, value=3.20, step=0.05)
+    with r_col3: b_odd2 = st.number_input("Quote 2 (Auswärts)", min_value=1.01, value=2.80, step=0.05)
+    
+    if st.button("🔍 Buchmacher entschlüsseln"):
+        true_1, true_x, true_2, vig = get_true_probabilities(b_odd1, b_oddx, b_odd2)
+        implied_xgh, implied_xga = reverse_engineer_odds(true_1, true_x, true_2, rho)
+        
+        st.info(f"📊 **Buchmacher-Marge (Vig):** {round((vig - 1) * 100, 2)}%")
+        st.success("Erfolgreich berechnet! Der Markt erwartet folgende Performance:")
+        
+        c_res1, c_res2 = st.columns(2)
+        c_res1.metric("Erwartete Tore HEIM ($xG$)", f"{implied_xgh}")
+        c_res2.metric("Erwartete Tore AUSWÄRTS ($xG$)", f"{implied_xga}")
+        
+        st.markdown("> **Wie du das nutzt:** Wenn du der Meinung bist, dass das Heimteam heute viel stärker ist als der vom Markt berechnete Wert von **" + str(implied_xgh) + "**, dann wechsle jetzt rüber in Tab 1, trage deinen höheren Wert ein und spiele den Heimsieg an!")
+
+# --- TAB 3: JOURNAL ---
 with tab_journal:
-    st.header("Dein Quant Portfolio")
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     kpi1.metric("Start-Kapital", f"{start_bankroll:.2f} €")
     kpi2.metric("Aktuelle Bankroll", f"{current_bankroll:.2f} €", f"{current_bankroll - start_bankroll:.2f} € Gewinn/Verlust")
@@ -168,29 +186,19 @@ with tab_journal:
         won_bets = len([b for b in settled_bets if b['Status'] == 'Gewonnen'])
         hitrate = (won_bets / len(settled_bets)) * 100
         kpi4.metric("ROI", f"{roi:.2f} %", f"Hitrate: {hitrate:.1f}%")
-    else:
-        kpi4.metric("ROI", "0.00 %")
+    else: kpi4.metric("ROI", "0.00 %")
 
-    st.markdown("### Laufende & Ausgewertete Wetten")
     if len(st.session_state.journal) > 0:
-        edited_journal = st.data_editor(
-            st.session_state.journal,
-            column_config={"Status": st.column_config.SelectboxColumn("Status", options=["Offen", "Gewonnen", "Verloren"], required=True)},
-            hide_index=True, use_container_width=True
-        )
+        edited_journal = st.data_editor(st.session_state.journal, column_config={"Status": st.column_config.SelectboxColumn("Status", options=["Offen", "Gewonnen", "Verloren"], required=True)}, hide_index=True, use_container_width=True)
         if edited_journal != st.session_state.journal:
             st.session_state.journal = edited_journal
             st.rerun()
             
-        # NEU: Backup & Reset Buttons
         col_btn1, col_btn2 = st.columns(2)
         with col_btn1:
-            df = pd.DataFrame(st.session_state.journal)
-            csv = df.to_csv(index=False).encode('utf-8')
+            csv = pd.DataFrame(st.session_state.journal).to_csv(index=False).encode('utf-8')
             st.download_button(label="💾 Journal als CSV sichern", data=csv, file_name='quant_journal_backup.csv', mime='text/csv')
         with col_btn2:
             if st.button("🗑️ Journal komplett löschen"):
                 st.session_state.journal = []
                 st.rerun()
-    else:
-        st.write("Dein Journal ist noch leer. Berechne eine Wette in der Engine und füge sie hinzu!")
