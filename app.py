@@ -50,14 +50,11 @@ def calculate_match_probabilities(xg_home, xg_away, rho, zip_factor, current_min
     rem_xg_home, rem_xg_away = xg_home * time_factor, xg_away * time_factor
 
     if red_home and not red_away:
-        rem_xg_home *= 0.60
-        rem_xg_away *= 1.35
+        rem_xg_home *= 0.60; rem_xg_away *= 1.35
     elif red_away and not red_home:
-        rem_xg_away *= 0.60
-        rem_xg_home *= 1.35
+        rem_xg_away *= 0.60; rem_xg_home *= 1.35
     elif red_home and red_away:
-        rem_xg_home *= 1.10
-        rem_xg_away *= 1.10
+        rem_xg_home *= 1.10; rem_xg_away *= 1.10
 
     for added_home in range(8):
         for added_away in range(8):
@@ -97,26 +94,17 @@ def calculate_kelly(prob, odds, fraction=0.25):
     return k * fraction if k > 0 else 0
 def format_odds(prob): return round(1 / prob, 2) if prob > 0 else 0.0
 
-# NEU: Die Power-Methode zur asymmetrischen Margen-Entfernung
 def get_true_probabilities(odds_1, odds_x, odds_2):
     i1, ix, i2 = 1 / odds_1, 1 / odds_x, 1 / odds_2
     vig = i1 + ix + i2
-    
-    # Wenn keine Marge vorhanden ist (z.B. Arbitrage), fallback zur naiven Methode
-    if vig <= 1.0:
-        return i1/vig, ix/vig, i2/vig, vig
+    if vig <= 1.0: return i1/vig, ix/vig, i2/vig, vig
         
-    # Iterative binäre Suche (Newton-Raphson Annäherung) für den Faktor k
     low, high = 1.0, 10.0
     for _ in range(50):
         k = (low + high) / 2
-        if (i1**k + ix**k + i2**k) > 1.0:
-            low = k
-        else:
-            high = k
-            
-    true_1, true_x, true_2 = i1**k, ix**k, i2**k
-    return true_1, true_x, true_2, vig
+        if (i1**k + ix**k + i2**k) > 1.0: low = k
+        else: high = k
+    return i1**k, ix**k, i2**k, vig
 
 def reverse_engineer_odds(true_p1, true_px, true_p2, rho, zip_factor):
     best_diff, best_xg_h, best_xg_a = 999.0, 1.0, 1.0
@@ -132,24 +120,23 @@ def reverse_engineer_odds(true_p1, true_px, true_p2, rho, zip_factor):
 # --- APP UI ---
 st.title("📈 Pro Quant Engine")
 
-# --- SIDEBAR ---
-st.sidebar.header("🏦 Start-Kapital")
-start_bankroll = st.sidebar.number_input("Initiale Bankroll (€)", min_value=1.0, value=10.0, step=0.5)
-min_bet = st.sidebar.number_input("Mindesteinsatz (€)", min_value=0.1, value=0.5, step=0.1)
+# NEU: Das Mobile-optimierte Kontrollzentrum (ersetzt die störende Sidebar)
+with st.expander("⚙️ Kontrollzentrum (Bankroll & Risiko)", expanded=False):
+    st.markdown("**1. Bankroll & Limit**")
+    c_k1, c_k2, c_k3 = st.columns(3)
+    with c_k1: start_bankroll = st.number_input("Initiale Bankroll (€)", min_value=1.0, value=10.0, step=0.5)
+    with c_k2: min_bet = st.number_input("Mindest-Bet (€)", min_value=0.1, value=0.5, step=0.1)
+    with c_k3: max_risk_pct = st.number_input("Max. Risiko (%)", min_value=1.0, max_value=15.0, value=5.0, step=0.5)
 
-st.sidebar.header("🛡️ Risikomanagement")
-kelly_fraction = st.sidebar.select_slider(
-    "Kelly-Strategie", 
-    options=[0.125, 0.25, 0.5, 1.0], 
-    value=0.25, 
-    format_func=lambda x: f"{int(1/x)}/1 Kelly (Defensiv)" if x == 0.125 else (f"{int(1/x)}/1 Kelly (Standard)" if x == 0.25 else (f"{int(1/x)}/1 Kelly (Aggressiv)" if x == 0.5 else "Full Kelly (Wahnsinn)"))
-)
-parallel_bets = st.sidebar.number_input("Anzahl paralleler Wetten", min_value=1, max_value=20, value=1, step=1)
-max_risk_pct = st.sidebar.slider("Max. Einsatz pro Wette (%)", min_value=1.0, max_value=10.0, value=5.0, step=0.5)
+    st.markdown("**2. Kelly & Diversifikation**")
+    c_k4, c_k5 = st.columns(2)
+    with c_k4: kelly_fraction = st.select_slider("Kelly-Faktor", options=[0.125, 0.25, 0.5, 1.0], value=0.25, format_func=lambda x: f"{int(1/x)}/1 Kelly")
+    with c_k5: parallel_bets = st.number_input("Parallele Spiele (Diversifikation)", min_value=1, max_value=20, value=1, step=1)
 
-st.sidebar.header("⚙️ Engine Settings")
-zip_factor = st.sidebar.slider("ZIP-Faktor (0:0 Boost)", min_value=0.00, max_value=0.20, value=0.05, step=0.01)
-rho = st.sidebar.slider("Dixon-Coles Faktor", min_value=-0.30, max_value=0.00, value=-0.15, step=0.01)
+    st.markdown("**3. Engine Tuning**")
+    c_k6, c_k7 = st.columns(2)
+    with c_k6: zip_factor = st.slider("ZIP-Faktor (0:0 Boost)", 0.0, 0.20, 0.05, 0.01)
+    with c_k7: rho = st.slider("Dixon-Coles Faktor", -0.30, 0.0, -0.15, 0.01)
 
 current_bankroll, exposure = start_bankroll, 0.0
 for bet in st.session_state.journal:
@@ -161,37 +148,42 @@ tab_engine, tab_reverse, tab_journal, tab_manual = st.tabs(["⚙️ Engine", "�
 
 # --- TAB 1: ENGINE ---
 with tab_engine:
-    st.markdown("### 1. Daten-Eingabe (Dein Modell)")
-    data_mode = st.radio("Wie möchtest du die Team-Stärke berechnen?", ["Direkte xG-Werte eingeben (Große Ligen)", "AS/DS Rechner: Ø Torschnitt (Kleine Ligen)"], horizontal=True)
+    st.markdown("### Daten-Eingabe (Dein Modell)")
+    data_mode = st.radio("Wie möchtest du die Team-Stärke berechnen?", ["Direkte xG-Werte eingeben", "AS/DS Rechner (Kleine Ligen)"], horizontal=True)
     
     st.markdown("---")
-    if data_mode == "Direkte xG-Werte eingeben (Große Ligen)":
+    if data_mode == "Direkte xG-Werte eingeben":
         c_xg1, c_xg2 = st.columns(2)
         with c_xg1: xg_home = st.number_input("Erwartete Tore Heim ($xG$)", min_value=0.1, max_value=5.0, value=1.5, step=0.1)
         with c_xg2: xg_away = st.number_input("Erwartete Tore Auswärts ($xG$)", min_value=0.1, max_value=5.0, value=1.1, step=0.1)
     else:
-        st.info("Trage hier die durchschnittlichen Tore ein. Die App generiert daraus einen unabhängigen Proxy-$xG$-Wert.")
+        # NEU: Das echte Liga-Schnitt AS/DS Modell
+        st.info("Trage hier die Torschnitte ein. Die App berechnet die echte Stärke relativ zur Liga.")
+        league_avg = st.number_input("🌍 Ø Tore pro Spiel in dieser Liga (Liga-Schnitt)", min_value=0.5, max_value=5.0, value=2.6, step=0.1)
+        
         c_as1, c_as2 = st.columns(2)
         with c_as1:
             st.markdown("**Heimteam (Zuhause)**")
-            home_scored = st.number_input("Ø Tore geschossen", min_value=0.0, value=1.8, step=0.1)
-            home_conceded = st.number_input("Ø Tore kassiert", min_value=0.0, value=0.9, step=0.1)
+            home_scored = st.number_input("Ø Tore geschossen", min_value=0.0, value=1.5, step=0.1)
+            home_conceded = st.number_input("Ø Tore kassiert", min_value=0.0, value=1.0, step=0.1)
         with c_as2:
             st.markdown("**Auswärtsteam (Auswärts)**")
-            away_scored = st.number_input("Ø Tore geschossen (Ausw.)", min_value=0.0, value=1.1, step=0.1)
-            away_conceded = st.number_input("Ø Tore kassiert (Ausw.)", min_value=0.0, value=1.5, step=0.1)
+            away_scored = st.number_input("Ø Tore geschossen (Ausw.)", min_value=0.0, value=1.2, step=0.1)
+            away_conceded = st.number_input("Ø Tore kassiert (Ausw.)", min_value=0.0, value=1.4, step=0.1)
         
-        xg_home, xg_away = (home_scored + away_conceded) / 2.0, (away_scored + home_conceded) / 2.0
+        # Mathematisch korrekte Poisson-Stärke Berechnung
+        avg_team = league_avg / 2.0
+        xg_home = (home_scored * away_conceded) / avg_team if avg_team > 0 else 0
+        xg_away = (away_scored * home_conceded) / avg_team if avg_team > 0 else 0
         st.success(f"🤖 **Generierte Stärke (Proxy-$xG$):** Heim **{round(xg_home, 2)}** | Auswärts **{round(xg_away, 2)}**")
 
     st.markdown("---")
-    with st.expander("⏱️ Live-Wetten Modus & Rote Karten aktivieren"):
+    with st.expander("⏱️ Live-Wetten Modus & Rote Karten"):
         col_l1, col_l2, col_l3 = st.columns(3)
         with col_l1: live_min = st.number_input("Minute", min_value=0, max_value=90, value=0, step=1)
         with col_l2: live_sh = st.number_input("Stand Heim", min_value=0, max_value=10, value=0, step=1)
         with col_l3: live_sa = st.number_input("Stand Ausw.", min_value=0, max_value=10, value=0, step=1)
         
-        st.markdown("🚨 **In-Play Schock-Events**")
         col_rc1, col_rc2 = st.columns(2)
         with col_rc1: red_h = st.checkbox("🟥 Heimteam in Unterzahl")
         with col_rc2: red_a = st.checkbox("🟥 Auswärtsteam in Unterzahl")
@@ -199,7 +191,7 @@ with tab_engine:
     probs = calculate_match_probabilities(xg_home, xg_away, rho, zip_factor, live_min, live_sh, live_sa, red_h, red_a)
         
     st.subheader("💡 Faire Modell-Quoten")
-    if red_h or red_a: st.info("⚠️ **Achtung:** Quoten wurden durch Rote Karten dynamisch angepasst!")
+    if red_h or red_a: st.info("⚠️ Quoten wurden durch Rote Karten dynamisch angepasst!")
         
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("1", format_odds(probs["1"]))
@@ -209,7 +201,7 @@ with tab_engine:
     c5.metric("BTTS (Ja)", format_odds(probs["BTTS"]))
     
     st.markdown("---")
-    st.header("2. Value-Check & Journal")
+    st.header("Value-Check & Journal")
     col_input1, col_input2 = st.columns(2)
     with col_input1: target_prob_input = st.number_input("Modell-Wahrscheinlichkeit (%)", min_value=1.0, max_value=99.0, value=float(round(probs['1']*100, 1)), step=0.1)
     with col_input2: target_odds = st.number_input("Buchmacher-Quote", min_value=1.01, value=2.00, step=0.05)
@@ -227,17 +219,17 @@ with tab_engine:
     if bet_size > 0 and bet_size < min_bet: bet_size = min_bet
 
     if ev > 0:
-        st.success(f"✅ Positiver EV: **+{round(ev * 100, 2)}%** | Empfohlener Einsatz: **{round(bet_size, 2)} €**")
-        if parallel_bets > 1: st.info(f"🔄 Einsatz wurde für **{parallel_bets} parallele Wetten** angepasst.")
-        if is_capped: st.warning(f"⚠️ Einsatz wurde durch dein Sicherheits-Limit ({max_risk_pct}%) gedeckelt.")
+        st.success(f"✅ Value: **+{round(ev * 100, 2)}%** | Einsatz: **{round(bet_size, 2)} €**")
+        if parallel_bets > 1: st.info(f"🔄 Risiko für {parallel_bets} parallele Wetten angepasst.")
+        if is_capped: st.warning(f"⚠️ Einsatz durch Limit ({max_risk_pct}%) gedeckelt.")
 
         with st.expander("Wette ins Journal übernehmen"):
             c_j1, c_j2, c_j3 = st.columns(3)
-            with c_j1: league_name = st.text_input("Liga (z.B. Schweden)")
-            with c_j2: match_name = st.text_input("Spiel (z.B. Team A - Team B)")
-            with c_j3: market_name = st.text_input("Tipp (z.B. Heim 1)")
+            with c_j1: league_name = st.text_input("Liga")
+            with c_j2: match_name = st.text_input("Spiel")
+            with c_j3: market_name = st.text_input("Tipp")
             
-            if st.button("Ins Journal eintragen (Cloud Sync)"):
+            if st.button("Ins Journal eintragen"):
                 st.session_state.journal.append({
                     "Liga": league_name if league_name else "Unbekannt",
                     "Spiel": match_name, 
@@ -255,7 +247,6 @@ with tab_engine:
 # --- TAB 2: REVERSE ENGINEERING ---
 with tab_reverse:
     st.header("🕵️ Buchmacher entschlüsseln")
-    st.info("Nutze diesen Tab, um zu sehen, wie der Markt denkt. Vergleiche den Wert dann mit deinen eigenen Berechnungen aus Tab 1.")
     r_col1, r_col2, r_col3 = st.columns(3)
     with r_col1: b_odd1 = st.number_input("Quote 1 (Heim)", min_value=1.01, value=2.50, step=0.05)
     with r_col2: b_oddx = st.number_input("Quote X (Draw)", min_value=1.01, value=3.20, step=0.05)
@@ -263,20 +254,17 @@ with tab_reverse:
     if st.button("🔍 Buchmacher entschlüsseln"):
         true_1, true_x, true_2, vig = get_true_probabilities(b_odd1, b_oddx, b_odd2)
         implied_xgh, implied_xga = reverse_engineer_odds(true_1, true_x, true_2, rho, zip_factor)
-        
-        # Hinweis-Banner auf die Power-Methode
-        st.success(f"📊 **Buchmacher-Marge (Vig):** {round((vig - 1) * 100, 2)}% | ⚙️ **Marge asymmetrisch bereinigt (Power-Methode)**")
-        
+        st.success(f"📊 **Vig:** {round((vig - 1) * 100, 2)}% | ⚙️ **Marge bereinigt (Power-Methode)**")
         c_res1, c_res2 = st.columns(2)
-        c_res1.metric("Erwartete Tore HEIM ($xG$)", f"{implied_xgh}")
-        c_res2.metric("Erwartete Tore AUSWÄRTS ($xG$)", f"{implied_xga}")
+        c_res1.metric("Erwartete Tore HEIM", f"{implied_xgh}")
+        c_res2.metric("Erwartete Tore AUSWÄRTS", f"{implied_xga}")
 
 # --- TAB 3: JOURNAL & DASHBOARD ---
 with tab_journal:
     kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
     kpi1.metric("Start-Kapital", f"{start_bankroll:.2f} €")
-    kpi2.metric("Akt. Bankroll", f"{current_bankroll:.2f} €", f"{current_bankroll - start_bankroll:.2f} € Profit")
-    kpi3.metric("Gebundenes", f"{exposure:.2f} €")
+    kpi2.metric("Akt. Bankroll", f"{current_bankroll:.2f} €", f"{current_bankroll - start_bankroll:.2f} €")
+    kpi3.metric("Gebunden", f"{exposure:.2f} €")
     
     settled_bets = [b for b in st.session_state.journal if b['Status'] in ['Gewonnen', 'Verloren']]
     total_invested = sum(b['Einsatz'] for b in settled_bets)
@@ -292,7 +280,7 @@ with tab_journal:
     kpi5.metric("Ø CLV", f"{avg_clv:+.2f} %")
 
     st.markdown("---")
-    st.subheader("🔮 Monte Carlo Stresstest (Zukunfts-Simulation)")
+    st.subheader("🔮 Monte Carlo Stresstest")
     if len(settled_bets) >= 5:
         profits = []
         for b in settled_bets:
@@ -305,8 +293,7 @@ with tab_journal:
             is_ruined = False
             for _ in range(100):
                 next_bankroll = path[-1] + random.choice(profits)
-                if next_bankroll <= 0:
-                    next_bankroll, is_ruined = 0, True
+                if next_bankroll <= 0: next_bankroll, is_ruined = 0, True
                 path.append(next_bankroll)
             if is_ruined: ruin_count += 1
             simulations.append(path)
@@ -317,13 +304,13 @@ with tab_journal:
         c_mc1, c_mc2, c_mc3 = st.columns(3)
         c_mc1.metric("Risk of Ruin (Pleite-Risiko)", f"{ror:.1f} %", delta="Ziel: < 5%", delta_color="inverse")
         c_mc2.metric("Erwartete Bankroll (Median)", f"{median_end:.2f} €")
-        c_mc3.metric("Best Case Szenario", f"{df_sim.iloc[-1].max():.2f} €")
-        st.line_chart(df_sim, height=300)
+        c_mc3.metric("Best Case", f"{df_sim.iloc[-1].max():.2f} €")
+        st.line_chart(df_sim, height=250)
     else:
-        st.info("⚠️ Du brauchst mindestens **5 abgerechnete Wetten (Gewonnen/Verloren)** im Journal, um den Monte Carlo Stresstest zu aktivieren.")
+        st.info("⚠️ Du brauchst 5 abgerechnete Wetten im Journal für die Monte-Carlo Simulation.")
 
     st.markdown("---")
-    st.subheader("🔍 Markt-Analyse")
+    st.subheader("🔍 Analyse")
     if len(settled_bets) > 0:
         df_settled = pd.DataFrame(settled_bets)
         col_m1, col_m2 = st.columns(2)
@@ -335,9 +322,7 @@ with tab_journal:
                 count, invested = len(m_bets), m_bets['Einsatz'].sum()
                 returned = m_bets.apply(lambda r: r['Einsatz'] * r['Quote'] if r['Status'] == 'Gewonnen' else 0, axis=1).sum()
                 profit, m_roi = returned - invested, (returned - invested) / invested * 100 if invested > 0 else 0
-                m_clv_list = [((r['Quote'] / r['Closing Quote']) - 1) * 100 for _, r in m_bets.iterrows() if pd.notna(r.get('Closing Quote')) and float(r.get('Closing Quote', 0)) > 0]
-                m_avg_clv = sum(m_clv_list) / len(m_clv_list) if m_clv_list else 0.0
-                market_stats.append({"Markt": market, "Wetten": count, "Profit": round(profit, 2), "ROI (%)": round(m_roi, 1), "Ø CLV (%)": round(m_avg_clv, 2)})
+                market_stats.append({"Markt": market, "Wetten": count, "Profit": round(profit, 2), "ROI (%)": round(m_roi, 1)})
             st.dataframe(pd.DataFrame(market_stats).sort_values(by="Profit", ascending=False), hide_index=True, use_container_width=True)
             
         with col_m2:
@@ -347,13 +332,11 @@ with tab_journal:
                 count, invested = len(l_bets), l_bets['Einsatz'].sum()
                 returned = l_bets.apply(lambda r: r['Einsatz'] * r['Quote'] if r['Status'] == 'Gewonnen' else 0, axis=1).sum()
                 profit, l_roi = returned - invested, (returned - invested) / invested * 100 if invested > 0 else 0
-                l_clv_list = [((r['Quote'] / r['Closing Quote']) - 1) * 100 for _, r in l_bets.iterrows() if pd.notna(r.get('Closing Quote')) and float(r.get('Closing Quote', 0)) > 0]
-                l_avg_clv = sum(l_clv_list) / len(l_clv_list) if l_clv_list else 0.0
-                league_stats.append({"Liga": league, "Wetten": count, "Profit": round(profit, 2), "ROI (%)": round(l_roi, 1), "Ø CLV (%)": round(l_avg_clv, 2)})
+                league_stats.append({"Liga": league, "Wetten": count, "Profit": round(profit, 2), "ROI (%)": round(l_roi, 1)})
             st.dataframe(pd.DataFrame(league_stats).sort_values(by="Profit", ascending=False), hide_index=True, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("📋 Wett-Historie & CLV-Eingabe")
+    st.subheader("📋 Historie & CLV-Eingabe")
     if len(st.session_state.journal) > 0:
         edited_journal = st.data_editor(
             st.session_state.journal, 
@@ -372,7 +355,7 @@ with tab_journal:
         col_btn1, col_btn2 = st.columns(2)
         with col_btn1:
             csv = pd.DataFrame(st.session_state.journal).to_csv(index=False).encode('utf-8')
-            st.download_button("💾 Als CSV Backup laden", data=csv, file_name='quant_journal.csv', mime='text/csv')
+            st.download_button("💾 CSV Backup", data=csv, file_name='quant_journal.csv', mime='text/csv')
         with col_btn2:
             if st.button("🗑️ Journal löschen"):
                 st.session_state.journal = []
@@ -382,46 +365,28 @@ with tab_journal:
 # --- TAB 4: HANDBUCH & PLAYBOOK ---
 with tab_manual:
     st.header("📚 Das Syndikat-Playbook")
-    st.markdown("Willkommen in der Dokumentation deiner Quant Betting Engine. Hier findest du alle Erklärungen zur Mathematik und Strategie deines Systems.")
     
-    with st.expander("1. Wie füttere ich kleine Ligen? (AS/DS Proxy)"):
+    with st.expander("1. AS/DS Modell (Kleine Ligen)"):
         st.markdown("""
-        In **kleinen Ligen** haben Buchmacher oft schlechte Daten. Genau hier hast du deinen Edge. Da es dort keine echten Expected Goals ($xG$) gibt, berechnet die App einen **Proxy-$xG$**.
-        
-        **So geht's:**
-        1. Öffne Flashscore (oder ähnlich).
-        2. Gehe zur Tabelle der Liga und wähle **"Heim / Auswärts"** (NICHT die Gesamttabelle!).
-        3. Lies die geschossenen/kassierten Tore pro Spiel ab und trage sie ein.
-        4. Die Engine verrechnet die Angriffsstärke (AS) des Heimteams mit der Abwehrschwäche (DS) des Auswärtsteams.
+        **Neu in v1.1:** Das Modell vergleicht Tore jetzt mit dem **Liga-Durchschnitt**.
+        * Eine Mannschaft, die in einer sehr defensiven Liga (z.B. Liga-Schnitt 2.1) 1.5 Tore schießt, bekommt mathematisch eine viel höhere Angriffsstärke (AS) zugewiesen, als ein Team, das 1.5 Tore in einer sehr offensiven Liga (Schnitt 3.5) erzielt.
+        * Das macht deine Proxy-$xG$ Berechnung für kleine Ligen jetzt extrem akkurat!
         """)
         
-    with st.expander("2. In-Play Schocks (Rote Karten & Live-Wetten)"):
+    with st.expander("2. In-Play Schocks & Rote Karten"):
         st.markdown("""
-        Wenn ein Spiel live läuft, rechnet die Engine automatisch mit dem **Time-Decay** (Zeitverfall). Ein $xG$-Wert von 1.5 schrumpft z.B. in der 45. Minute auf 0.75 zusammen.
-        
-        **Die Rote Karte (Schock):**
-        Wenn ein Spieler vom Platz fliegt, geraten Buchmacher in Panik. Deine Engine nutzt historische Multiplikatoren:
-        * **Unterzahl:** Das Team generiert 40% weniger Torchancen.
-        * **Überzahl:** Der Gegner generiert 35% mehr Torchancen.
-        Setze das Häkchen und die Engine spuckt dir in Echtzeit die korrigierten Quoten aus.
+        * **Time-Decay:** $xG$-Werte schmelzen mit fortlaufender Zeit.
+        * **Rote Karte:** Unterzahl = 40% weniger Torchancen. Überzahl = 35% mehr Torchancen.
         """)
         
-    with st.expander("3. Was ist der ZIP-Faktor (Zero-Inflation)?"):
+    with st.expander("3. ZIP-Faktor (Zero-Inflation)"):
         st.markdown("""
-        Die Poisson-Verteilung ist blind für menschliches Verhalten. Sie weiß nicht, dass Teams ab der 75. Minute bei einem 1:1 oft "den Bus parken" und defensiver spielen.
-        
-        **Die Lösung:**
-        Der **ZIP-Faktor (Standard: 5%)** hebt die Wahrscheinlichkeit für exakt 0 Tore künstlich an und senkt Ausreißer (wie 5:1) ab.
+        Die Poisson-Verteilung unterschätzt 0:0 Spiele. Der **ZIP-Faktor (Standard: 5%)** hebt die Wahrscheinlichkeit für keine Tore an. Ideal für K.O.-Spiele oder Endphasen, wenn Teams "den Bus parken".
         """)
         
     with st.expander("4. CLV, Monte Carlo & Power-Methode"):
         st.markdown("""
-        **CLV (Closing Line Value):**
-        Der wichtigste Wert. Wenn du eine Quote von 2.10 kaufst und das Spiel bei 1.90 startet (Closing Line), bist du dem Markt voraus.
-        
-        **Monte Carlo:**
-        Simuliert 50 parallele Zukünfte basierend auf deiner echten Hitrate. Halte deinen **Risk of Ruin** durch den Kelly-Regler unter 5%.
-        
-        **Power-Methode (Tab 2):**
-        Buchmacher schlagen auf Außenseiter mehr Marge auf als auf Favoriten (Favorite-Longshot Bias). Tab 2 nutzt eine iterative binäre Suche (Power-Methode), um die Marge asymmetrisch herauszurechnen und so die wahren xG-Werte der Buchmacher zu entschlüsseln.
+        * **CLV:** Miss dich an der Schlussquote, nicht am puren Gewinn.
+        * **Monte Carlo:** Teste deine Strategie an 50 alternativen Zukunftsszenarien.
+        * **Power-Methode:** Tab 2 zieht Außenseitern asymmetrisch mehr Marge ab als Favoriten (Favorite-Longshot Bias), um die *echten* xG des Buchmachers zu finden.
         """)
