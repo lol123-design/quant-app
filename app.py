@@ -11,16 +11,11 @@ def poisson_prob(k, lambd):
     return (lambd**k * math.exp(-lambd)) / math.factorial(k)
 
 def dixon_coles_adjustment(home_goals, away_goals, lambd, mu, rho):
-    if home_goals == 0 and away_goals == 0:
-        return 1 - (lambd * mu * rho)
-    elif home_goals == 1 and away_goals == 0:
-        return 1 + (mu * rho)
-    elif home_goals == 0 and away_goals == 1:
-        return 1 + (lambd * rho)
-    elif home_goals == 1 and away_goals == 1:
-        return 1 - rho
-    else:
-        return 1.0
+    if home_goals == 0 and away_goals == 0: return 1 - (lambd * mu * rho)
+    elif home_goals == 1 and away_goals == 0: return 1 + (mu * rho)
+    elif home_goals == 0 and away_goals == 1: return 1 + (lambd * rho)
+    elif home_goals == 1 and away_goals == 1: return 1 - rho
+    else: return 1.0
 
 def calculate_match_probabilities(xg_home, xg_away, rho):
     prob_1, prob_x, prob_2 = 0.0, 0.0, 0.0
@@ -48,12 +43,21 @@ def calculate_match_probabilities(xg_home, xg_away, rho):
             if margin <= 1: prob_ah_a_plus15 += prob
 
     total_prob = prob_1 + prob_x + prob_2
+    p1 = prob_1 / total_prob
+    px = prob_x / total_prob
+    p2 = prob_2 / total_prob
     
+    # Draw No Bet Berechnung (Ausklammern des Unentschiedens)
+    dnb_1 = p1 / (p1 + p2) if (p1 + p2) > 0 else 0
+    dnb_2 = p2 / (p1 + p2) if (p1 + p2) > 0 else 0
+
     return {
-        "1": prob_1/total_prob, "X": prob_x/total_prob, "2": prob_2/total_prob,
+        "1": p1, "X": px, "2": p2,
         "Over25": prob_over_25, "BTTS": prob_btts,
         "AH_H_minus15": prob_ah_h_minus15, "AH_H_plus15": prob_ah_h_plus15,
-        "AH_A_minus15": prob_ah_a_minus15, "AH_A_plus15": prob_ah_a_plus15
+        "AH_A_minus15": prob_ah_a_minus15, "AH_A_plus15": prob_ah_a_plus15,
+        "1X": p1 + px, "X2": p2 + px, "12": p1 + p2,
+        "DNB1": dnb_1, "DNB2": dnb_2
     }
 
 def calculate_ev(prob, odds):
@@ -71,7 +75,7 @@ def format_odds(prob):
 
 # --- APP UI ---
 st.set_page_config(page_title="Quant Betting Engine", page_icon="📈", layout="wide")
-st.title("📈 Pro Quant Engine v4.0")
+st.title("📈 Pro Quant Engine v5.0")
 
 # --- SIDEBAR ---
 st.sidebar.header("🏦 Start-Kapital")
@@ -82,15 +86,12 @@ st.sidebar.header("⚙️ Engine Settings")
 rho = st.sidebar.slider("Dixon-Coles Faktor", min_value=-0.30, max_value=0.00, value=-0.15, step=0.01)
 
 # --- BERECHNUNG AKTUELLE BANKROLL ---
-# Die Bankroll berechnet sich on-the-fly aus dem Journal
 current_bankroll = start_bankroll
 exposure = 0.0
 for bet in st.session_state.journal:
     current_bankroll -= bet['Einsatz']
-    if bet['Status'] == 'Gewonnen':
-        current_bankroll += bet['Einsatz'] * bet['Quote']
-    if bet['Status'] == 'Offen':
-        exposure += bet['Einsatz']
+    if bet['Status'] == 'Gewonnen': current_bankroll += bet['Einsatz'] * bet['Quote']
+    if bet['Status'] == 'Offen': exposure += bet['Einsatz']
 
 # --- TABS LAYOUT ---
 tab_engine, tab_journal = st.tabs(["⚙️ Quant Engine", "📖 Portfolio & Journal"])
@@ -98,15 +99,13 @@ tab_engine, tab_journal = st.tabs(["⚙️ Quant Engine", "📖 Portfolio & Jour
 with tab_engine:
     st.header("1. Match-Analyse ($xG$)")
     col1, col2 = st.columns(2)
-    with col1:
-        xg_home = st.number_input("Erwartete Tore Heim ($xG$)", min_value=0.1, max_value=5.0, value=1.5, step=0.1)
-    with col2:
-        xg_away = st.number_input("Erwartete Tore Auswärts ($xG$)", min_value=0.1, max_value=5.0, value=1.1, step=0.1)
+    with col1: xg_home = st.number_input("Tore Heim ($xG$)", min_value=0.1, max_value=5.0, value=1.5, step=0.1)
+    with col2: xg_away = st.number_input("Tore Auswärts ($xG$)", min_value=0.1, max_value=5.0, value=1.1, step=0.1)
 
     probs = calculate_match_probabilities(xg_home, xg_away, rho)
 
     st.markdown("---")
-    st.subheader("💡 Faire Modell-Quoten")
+    st.subheader("💡 Basis-Märkte")
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("1", format_odds(probs["1"]))
     c2.metric("X", format_odds(probs["X"]))
@@ -114,6 +113,15 @@ with tab_engine:
     c4.metric("Über 2.5", format_odds(probs["Over25"]))
     c5.metric("BTTS (Ja)", format_odds(probs["BTTS"]))
     
+    st.subheader("🛡️ Absicherung (Draw No Bet & Doppelte Chance)")
+    c10, c11, c12, c13, c14 = st.columns(5)
+    c10.metric("Heim DNB (AH 0)", format_odds(probs["DNB1"]))
+    c11.metric("Auswärts DNB (AH 0)", format_odds(probs["DNB2"]))
+    c12.metric("Heim oder X (1X)", format_odds(probs["1X"]))
+    c13.metric("Auswärts oder X (X2)", format_odds(probs["X2"]))
+    c14.metric("Kein X (12)", format_odds(probs["12"]))
+
+    st.subheader("⚖️ Asian Handicap Märkte")
     c6, c7, c8, c9 = st.columns(4)
     c6.metric("Heim -1.5", format_odds(probs["AH_H_minus15"]))
     c7.metric("Heim +1.5", format_odds(probs["AH_H_plus15"]))
@@ -122,49 +130,36 @@ with tab_engine:
 
     st.markdown("---")
     st.header("2. Value-Check & Wette einbuchen")
-    col10, col11 = st.columns(2)
-    with col10:
+    col_input1, col_input2 = st.columns(2)
+    with col_input1:
         target_prob_input = st.number_input("Modell-Wahrscheinlichkeit (%)", min_value=1.0, max_value=99.0, value=float(round(probs['1']*100, 1)), step=0.1)
         target_prob = target_prob_input / 100.0
-    with col11:
+    with col_input2:
         target_odds = st.number_input("Buchmacher-Quote", min_value=1.01, value=2.00, step=0.05)
 
     ev = calculate_ev(target_prob, target_odds)
     bet_size = current_bankroll * calculate_kelly(target_prob, target_odds, fraction=0.25)
-    
     if bet_size > 0 and bet_size < min_bet: bet_size = min_bet
 
     if ev > 0:
-        st.success(f"✅ Positiver EV: **+{round(ev * 100, 2)}%** | Empfohlener Einsatz: **{round(bet_size, 2)} €**")
-        
-        # Formular zum Eintragen
+        st.success(f"✅ Positiver EV: **+{round(ev * 100, 2)}%** | Einsatz: **{round(bet_size, 2)} €**")
         with st.expander("Wette ins Journal übernehmen"):
             match_name = st.text_input("Spiel (z.B. Sparta Prag - Brünn)")
-            market_name = st.text_input("Tipp (z.B. Heim -1.5)")
+            market_name = st.text_input("Tipp (z.B. Heim DNB)")
             if st.button("Ins Journal eintragen"):
-                new_bet = {
-                    "Spiel": match_name,
-                    "Tipp": market_name,
-                    "Quote": target_odds,
-                    "Einsatz": round(bet_size, 2),
-                    "EV (%)": round(ev * 100, 2),
-                    "Status": "Offen"
-                }
+                new_bet = {"Spiel": match_name, "Tipp": market_name, "Quote": target_odds, "Einsatz": round(bet_size, 2), "EV (%)": round(ev * 100, 2), "Status": "Offen"}
                 st.session_state.journal.append(new_bet)
-                st.rerun() # Läd die Seite neu, um die Bankroll sofort zu aktualisieren
+                st.rerun()
     else:
         st.error(f"❌ Negativer EV: **{round(ev * 100, 2)}%**. Kein Value.")
 
 with tab_journal:
     st.header("Dein Quant Portfolio")
-    
-    # Portfolio KPIs
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     kpi1.metric("Start-Kapital", f"{start_bankroll:.2f} €")
     kpi2.metric("Aktuelle Bankroll", f"{current_bankroll:.2f} €", f"{current_bankroll - start_bankroll:.2f} € Gewinn/Verlust")
     kpi3.metric("Gebundenes Kapital", f"{exposure:.2f} €")
     
-    # ROI & Hitrate Berechnung
     settled_bets = [b for b in st.session_state.journal if b['Status'] in ['Gewonnen', 'Verloren']]
     total_invested = sum(b['Einsatz'] for b in settled_bets)
     if total_invested > 0:
@@ -178,29 +173,24 @@ with tab_journal:
 
     st.markdown("### Laufende & Ausgewertete Wetten")
     if len(st.session_state.journal) > 0:
-        st.info("💡 Klicke doppelt in die Spalte 'Status', um eine Wette auf 'Gewonnen' oder 'Verloren' zu setzen.")
-        
-        # Interaktive Tabelle
         edited_journal = st.data_editor(
             st.session_state.journal,
-            column_config={
-                "Status": st.column_config.SelectboxColumn(
-                    "Status",
-                    options=["Offen", "Gewonnen", "Verloren"],
-                    required=True
-                )
-            },
-            hide_index=True,
-            use_container_width=True
+            column_config={"Status": st.column_config.SelectboxColumn("Status", options=["Offen", "Gewonnen", "Verloren"], required=True)},
+            hide_index=True, use_container_width=True
         )
-        
-        # Speichert Änderungen sofort in der Session
         if edited_journal != st.session_state.journal:
             st.session_state.journal = edited_journal
             st.rerun()
             
-        if st.button("Journal komplett löschen"):
-            st.session_state.journal = []
-            st.rerun()
+        # NEU: Backup & Reset Buttons
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            df = pd.DataFrame(st.session_state.journal)
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button(label="💾 Journal als CSV sichern", data=csv, file_name='quant_journal_backup.csv', mime='text/csv')
+        with col_btn2:
+            if st.button("🗑️ Journal komplett löschen"):
+                st.session_state.journal = []
+                st.rerun()
     else:
         st.write("Dein Journal ist noch leer. Berechne eine Wette in der Engine und füge sie hinzu!")
