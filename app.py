@@ -141,7 +141,8 @@ for bet in st.session_state.journal:
     if bet['Status'] == 'Gewonnen': current_bankroll += bet['Einsatz'] * bet['Quote']
     if bet['Status'] == 'Offen': exposure += bet['Einsatz']
 
-tab_engine, tab_reverse, tab_journal = st.tabs(["⚙️ Engine", "🕵️ Reverse", "📖 Portfolio & Analytics"])
+# NEU: Der vierte Tab "Handbuch"
+tab_engine, tab_reverse, tab_journal, tab_manual = st.tabs(["⚙️ Engine", "🕵️ Reverse", "📖 Portfolio", "📚 Handbuch"])
 
 # --- TAB 1: ENGINE ---
 with tab_engine:
@@ -273,55 +274,35 @@ with tab_journal:
     kpi5.metric("Ø CLV", f"{avg_clv:+.2f} %")
 
     st.markdown("---")
-    
-    # NEU: MONTE CARLO SIMULATION
     st.subheader("🔮 Monte Carlo Stresstest (Zukunfts-Simulation)")
     if len(settled_bets) >= 5:
-        st.write("Die App hat deine bisherigen Ergebnisse analysiert und simuliert jetzt **50 parallele Universen**, in denen du jeweils **100 weitere Wetten** mit deiner aktuellen Hitrate platzierst.")
-        
-        # Historische Profit-Ergebnisse extrahieren
         profits = []
         for b in settled_bets:
-            if b['Status'] == 'Gewonnen':
-                profits.append(b['Einsatz'] * b['Quote'] - b['Einsatz'])
-            else:
-                profits.append(-b['Einsatz'])
+            if b['Status'] == 'Gewonnen': profits.append(b['Einsatz'] * b['Quote'] - b['Einsatz'])
+            else: profits.append(-b['Einsatz'])
         
-        # 50 Pfade, 100 Wetten in die Zukunft simulieren (Bootstrapping)
-        simulations = []
-        ruin_count = 0
-        
+        simulations, ruin_count = [], 0
         for _ in range(50):
             path = [current_bankroll]
             is_ruined = False
             for _ in range(100):
                 next_bankroll = path[-1] + random.choice(profits)
                 if next_bankroll <= 0:
-                    next_bankroll = 0
-                    is_ruined = True
+                    next_bankroll, is_ruined = 0, True
                 path.append(next_bankroll)
             if is_ruined: ruin_count += 1
             simulations.append(path)
             
         df_sim = pd.DataFrame(simulations).T
-        
-        # Metriken berechnen
-        ror = (ruin_count / 50) * 100
-        median_end = df_sim.iloc[-1].median()
+        ror, median_end = (ruin_count / 50) * 100, df_sim.iloc[-1].median()
         
         c_mc1, c_mc2, c_mc3 = st.columns(3)
         c_mc1.metric("Risk of Ruin (Pleite-Risiko)", f"{ror:.1f} %", delta="Ziel: < 5%", delta_color="inverse")
         c_mc2.metric("Erwartete Bankroll (Median)", f"{median_end:.2f} €")
-        
-        # Finde den besten und schlechtesten Verlauf (ohne 0)
-        best_case = df_sim.iloc[-1].max()
-        c_mc3.metric("Best Case Szenario", f"{best_case:.2f} €")
-        
-        # Den extrem technischen "Spaghetti-Chart" zeichnen
+        c_mc3.metric("Best Case Szenario", f"{df_sim.iloc[-1].max():.2f} €")
         st.line_chart(df_sim, height=300)
     else:
-        st.info("⚠️ Du brauchst mindestens **5 abgerechnete Wetten (Gewonnen/Verloren)** im Journal, damit die Monte-Carlo-Simulation genug Daten hat, um deine Zukunft zu berechnen.")
-
+        st.info("⚠️ Du brauchst mindestens **5 abgerechnete Wetten (Gewonnen/Verloren)** im Journal, um den Monte Carlo Stresstest zu aktivieren.")
 
     st.markdown("---")
     st.subheader("🔍 Markt-Analyse")
@@ -379,3 +360,47 @@ with tab_journal:
                 st.session_state.journal = []
                 save_journal([])
                 st.rerun()
+
+# --- TAB 4: HANDBUCH & PLAYBOOK ---
+with tab_manual:
+    st.header("📚 Das Syndikat-Playbook")
+    st.markdown("Willkommen in der Dokumentation deiner Quant Betting Engine. Hier findest du alle Erklärungen zur Mathematik und Strategie deines Systems.")
+    
+    with st.expander("1. Wie füttere ich kleine Ligen? (AS/DS Proxy)"):
+        st.markdown("""
+        In **kleinen Ligen** (z.B. Regionalliga, Schweden 2) haben Buchmacher oft schlechte Daten. Genau hier hast du deinen Edge. Da es dort keine echten Expected Goals ($xG$) gibt, berechnet die App einen **Proxy-$xG$**.
+        
+        **So geht's:**
+        1. Öffne Flashscore (oder eine ähnliche App).
+        2. Gehe zur Tabelle der Liga und wähle **"Heim / Auswärts"** (NICHT die Gesamttabelle!).
+        3. Lies die geschossenen/kassierten Tore pro Spiel ab und trage sie ein.
+        4. Die Engine verrechnet die Angriffsstärke (AS) des Heimteams mit der Abwehrschwäche (DS) des Auswärtsteams.
+        """)
+        
+    with st.expander("2. In-Play Schocks (Rote Karten & Live-Wetten)"):
+        st.markdown("""
+        Wenn ein Spiel live läuft, rechnet die Engine automatisch mit dem **Time-Decay** (Zeitverfall). Ein $xG$-Wert von 1.5 schrumpft z.B. in der 45. Minute auf 0.75 zusammen.
+        
+        **Die Rote Karte (Schock):**
+        Wenn ein Spieler vom Platz fliegt, geraten Buchmacher oft in Panik. Deine Engine nutzt historische Multiplikatoren:
+        * **Unterzahl:** Das Team generiert 40% weniger Torchancen.
+        * **Überzahl:** Der Gegner generiert 35% mehr Torchancen.
+        Setze einfach das Häkchen und die Engine spuckt dir in Echtzeit die korrigierten Quoten aus.
+        """)
+        
+    with st.expander("3. Was ist der ZIP-Faktor (Zero-Inflation)?"):
+        st.markdown("""
+        Die Poisson-Verteilung ist blind für menschliches Verhalten. Sie weiß nicht, dass Teams ab der 75. Minute bei einem 1:1 oft "den Bus parken" und defensiver spielen.
+        
+        **Die Lösung:**
+        Der **ZIP-Faktor (Standard: 5%)** hebt die Wahrscheinlichkeit für exakt 0 Tore in der restlichen Spielzeit künstlich an und senkt Ausreißer (wie 5:1) ab. Drehe diesen Wert bei besonders defensiven Ligen ruhig auf 8% oder 10% hoch.
+        """)
+        
+    with st.expander("4. CLV & Monte Carlo (Der Heilige Gral)"):
+        st.markdown("""
+        **CLV (Closing Line Value):**
+        Der wichtigste Wert im Journal. Wenn du eine Quote von 2.10 kaufst und das Spiel bei 1.90 startet (Closing Line), bist du dem Markt voraus. Langfristig positiver CLV = Garantierter Reichtum, egal wie viele Spiele kurzfristig durch Pech verloren gehen.
+        
+        **Monte Carlo:**
+        Simuliert 50 parallele Zukünfte basierend auf deiner echten Hitrate. Der wichtigste Wert hier ist der **Risk of Ruin (Pleite-Risiko)**. Halte diesen Wert durch Anpassung des Kelly-Reglers immer unter 5%.
+        """)
