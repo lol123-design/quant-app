@@ -1,29 +1,27 @@
 import streamlit as st
 import math
 import pandas as pd
+import requests
 import random
-import io
-from supabase import create_client, Client
 
 st.set_page_config(page_title="Quant Betting Engine", page_icon="📈", layout="wide")
 
-# --- SUPABASE DATENBANK ANBINDUNG ---
-SUPABASE_URL = st.secrets["SUPABASE_URL"]
-SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+BIN_ID = st.secrets["BIN_ID"]
+API_KEY = st.secrets["API_KEY"]
+JSONBIN_URL = f"https://api.jsonbin.io/v3/b/{BIN_ID}"
 
 def load_journal():
+    headers = {"X-Master-Key": API_KEY}
     try:
-        response = supabase.table("app_state").select("journal_data").eq("id", 1).execute()
-        if response.data: return response.data[0]["journal_data"]
+        req = requests.get(JSONBIN_URL, headers=headers)
+        if req.status_code == 200: return req.json().get("record", {}).get("data", [])
         return []
     except: return []
 
 def save_journal(journal_data):
-    try:
-        supabase.table("app_state").update({"journal_data": journal_data}).eq("id", 1).execute()
-    except Exception as e:
-        st.sidebar.error("Fehler beim Speichern in der DB!")
+    headers = {"Content-Type": "application/json", "X-Master-Key": API_KEY}
+    try: requests.put(JSONBIN_URL, json={"data": journal_data}, headers=headers)
+    except: pass
 
 if 'journal' not in st.session_state:
     loaded_data = load_journal()
@@ -32,14 +30,11 @@ if 'journal' not in st.session_state:
         if "Closing Quote" not in bet: bet["Closing Quote"] = bet.get("Quote", 0.0)
     st.session_state.journal = loaded_data
 
-# --- MATHEMATIK & CACHING ---
-@st.cache_data
 def zip_poisson(k, lambd, zip_factor):
     p = (lambd**k * math.exp(-lambd)) / math.factorial(k)
     if k == 0: return zip_factor + (1 - zip_factor) * p
     else: return (1 - zip_factor) * p
 
-@st.cache_data
 def dixon_coles_adjustment(home_goals, away_goals, lambd, mu, rho):
     if home_goals == 0 and away_goals == 0: return 1 - (lambd * mu * rho)
     elif home_goals == 1 and away_goals == 0: return 1 + (mu * rho)
@@ -47,7 +42,6 @@ def dixon_coles_adjustment(home_goals, away_goals, lambd, mu, rho):
     elif home_goals == 1 and away_goals == 1: return 1 - rho
     else: return 1.0
 
-@st.cache_data
 def calculate_match_probabilities(xg_home, xg_away, rho, zip_factor, current_minute=0, score_home=0, score_away=0, red_home=False, red_away=False):
     prob_1, prob_x, prob_2, prob_over_25, prob_btts = 0.0, 0.0, 0.0, 0.0, 0.0
     p_m_plus2, p_m_plus1, p_m_0, p_m_minus1, p_m_minus2 = 0.0, 0.0, 0.0, 0.0, 0.0
@@ -101,6 +95,7 @@ def get_ah_odds(m2, m1, m0, mm1, mm2):
         d = win + 0.5 * h_win
         if d <= 0: return 0.0
         return round((1 - push - 0.5 * h_win - 0.5 * h_loss) / d, 2)
+    
     return {
         "H": [
             calc(m2, 0, 0, 0, m1+m0+mm1+mm2), calc(m2, 0, m1, 0, m0+mm1+mm2), calc(m2, m1, 0, 0, m0+mm1+mm2),
@@ -122,7 +117,6 @@ def calculate_kelly(prob, odds, fraction=0.25):
     return k * fraction if k > 0 else 0
 def format_odds(prob): return round(1 / prob, 2) if prob > 0 else 0.0
 
-@st.cache_data
 def get_true_probabilities(odds_1, odds_x, odds_2):
     i1, ix, i2 = 1 / odds_1, 1 / odds_x, 1 / odds_2
     vig = i1 + ix + i2
@@ -134,7 +128,6 @@ def get_true_probabilities(odds_1, odds_x, odds_2):
         else: high = k
     return i1**k, ix**k, i2**k, vig
 
-@st.cache_data
 def reverse_engineer_odds(true_p1, true_px, true_p2, rho, zip_factor):
     best_diff, best_xg_h, best_xg_a = 999.0, 1.0, 1.0
     for h in range(1, 41):
@@ -144,33 +137,6 @@ def reverse_engineer_odds(true_p1, true_px, true_p2, rho, zip_factor):
             diff = abs(probs["1"] - true_p1) + abs(probs["X"] - true_px) + abs(probs["2"] - true_p2)
             if diff < best_diff: best_diff, best_xg_h, best_xg_a = diff, xgh, xga
     return best_xg_h, best_xg_a
-
-def map_raw_columns(df):
-    df.columns = [str(c).strip().lower() for c in df.columns]
-    mapping = {
-        'HomeTeam': ['hometeam', 'home_team_name', 'home team', 'team1', 'home'],
-        'AwayTeam': ['awayteam', 'away_team_name', 'away team', 'team2', 'away'],
-        'Home_xG': ['home_xg', 'team_a_xg', 'homexg', 'xg_home', 'expected_goals_home'],
-        'Away_xG': ['away_xg', 'team_b_xg', 'awayxg', 'xg_away', 'expected_goals_away'],
-        'Odds_1': ['odds_1', 'odds_ft_1', 'home_odds', 'odds1', '1'],
-        'Odds_X': ['odds_x', 'odds_ft_x', 'draw_odds', 'oddsx', 'x', 'draw'],
-        'Odds_2': ['odds_2', 'odds_ft_2', 'away_odds', 'odds2', '2'],
-        'Home_Scored': ['home_scored', 'home_team_goal_count', 'home_goals_avg'],
-        'Home_Conceded': ['home_conceded', 'home_team_goals_conceded', 'home_conceded_avg'],
-        'Away_Scored': ['away_scored', 'away_team_goal_count', 'away_goals_avg'],
-        'Away_Conceded': ['away_conceded', 'away_team_goals_conceded', 'away_conceded_avg'],
-        'League_Avg': ['league_avg', 'average_goals_per_match']
-    }
-    
-    new_df = pd.DataFrame()
-    found_cols = []
-    for std_col, aliases in mapping.items():
-        for alias in aliases:
-            if alias in df.columns:
-                new_df[std_col] = df[alias]
-                found_cols.append(std_col)
-                break
-    return new_df, found_cols
 
 # --- APP UI ---
 st.title("📈 Pro Quant Engine")
@@ -198,7 +164,7 @@ for bet in st.session_state.journal:
     if bet['Status'] == 'Gewonnen': current_bankroll += bet['Einsatz'] * bet['Quote']
     if bet['Status'] == 'Offen': exposure += bet['Einsatz']
 
-tab_engine, tab_bulk, tab_journal, tab_manual = st.tabs(["⚙️ Engine & Scanner", "📂 Bulk-Scanner", "📖 Portfolio", "📚 Handbuch"])
+tab_engine, tab_journal, tab_manual = st.tabs(["⚙️ Engine & Scanner", "📖 Portfolio", "📚 Handbuch"])
 
 # --- TAB 1: ENGINE & SCANNER ---
 with tab_engine:
@@ -224,7 +190,17 @@ with tab_engine:
         xg_away = (away_scored * home_conceded) / avg_team if avg_team > 0 else 0
         st.success(f"🤖 **Generierte Stärke (Proxy-$xG$):** Heim **{round(xg_home, 2)}** | Auswärts **{round(xg_away, 2)}**")
 
-    probs = calculate_match_probabilities(xg_home, xg_away, rho, zip_factor, 0, 0, 0, False, False)
+    with st.expander("⏱️ Live-Wetten Modus & Rote Karten"):
+        col_l1, col_l2, col_l3 = st.columns(3)
+        with col_l1: live_min = st.number_input("Minute", min_value=0, max_value=90, value=0, step=1)
+        with col_l2: live_sh = st.number_input("Stand Heim", min_value=0, max_value=10, value=0, step=1)
+        with col_l3: live_sa = st.number_input("Stand Ausw.", min_value=0, max_value=10, value=0, step=1)
+        
+        col_rc1, col_rc2 = st.columns(2)
+        with col_rc1: red_h = st.checkbox("🟥 Heimteam in Unterzahl")
+        with col_rc2: red_a = st.checkbox("🟥 Auswärtsteam in Unterzahl")
+    
+    probs = calculate_match_probabilities(xg_home, xg_away, rho, zip_factor, live_min, live_sh, live_sa, red_h, red_a)
         
     st.markdown("---")
     st.markdown("### 2. Der xG-Delta-Scanner (Buchmacher vs. Modell)")
@@ -236,6 +212,7 @@ with tab_engine:
     if b_odd1 and b_oddx and b_odd2:
         true_1, true_x, true_2, vig = get_true_probabilities(b_odd1, b_oddx, b_odd2)
         implied_xgh, implied_xga = reverse_engineer_odds(true_1, true_x, true_2, rho, zip_factor)
+        
         delta_h, delta_a = xg_home - implied_xgh, xg_away - implied_xga
         
         st.markdown(f"**📊 Buchmacher-Marge:** {round((vig - 1) * 100, 2)}%")
@@ -264,6 +241,47 @@ with tab_engine:
         })
         st.dataframe(df_scan, hide_index=True, use_container_width=True)
 
+    with st.expander("🏮 Asian Handicap (Faire Quoten Matrix)", expanded=False):
+        m = probs["margins"]
+        ah_data = get_ah_odds(m["+2"], m["+1"], m["0"], m["-1"], m["-2"])
+        ah_labels_h = ["-1.5", "-1.0", "-0.75", "-0.5", "-0.25", "0.0 (DNB)", "+0.25", "+0.5", "+0.75", "+1.0", "+1.5"]
+        ah_labels_a = ["+1.5", "+1.0", "+0.75", "+0.5", "+0.25", "0.0 (DNB)", "-0.25", "-0.5", "-0.75", "-1.0", "-1.5"]
+        
+        df_ah = pd.DataFrame({
+            "Line (Heim)": ah_labels_h,
+            "Faire Quote (1)": ah_data["H"],
+            "Line (Auswärts)": ah_labels_a,
+            "Faire Quote (2)": ah_data["A"]
+        })
+        st.dataframe(df_ah, hide_index=True, use_container_width=True)
+
+    with st.expander("🛡️ Live Cashout & Hedge-Rechner", expanded=False):
+        st.markdown("Führt dein Team live und der Buchmacher bietet einen Cashout an? Finde heraus, ob das Angebot fair ist oder du dich besser selbst absichern solltest (Hedging).")
+        c_h1, c_h2 = st.columns(2)
+        with c_h1: h_orig_stake = st.number_input("Dein Einsatz (€)", min_value=1.0, value=10.0, step=1.0)
+        with c_h2: h_orig_odds = st.number_input("Gespielte Quote", min_value=1.01, value=3.0, step=0.05)
+        
+        c_h3, c_h4 = st.columns(2)
+        with c_h3: h_opp_odds = st.number_input("Aktuelle Gegenquote", min_value=1.01, value=1.5, step=0.05)
+        with c_h4: h_cashout = st.number_input("Cashout-Angebot (€)", min_value=0.0, value=15.0, step=1.0)
+
+        hedge_stake = (h_orig_stake * h_orig_odds) / h_opp_odds
+        guaranteed_return = h_orig_stake * h_orig_odds
+        net_profit = guaranteed_return - h_orig_stake - hedge_stake
+        
+        st.markdown("---")
+        st.markdown(f"**💡 Strategie: Risikofreies Hedging**")
+        st.info(f"Wenn du jetzt **{round(hedge_stake, 2)} €** auf die Gegenquote setzt, gewinnst du unabhängig vom Spielausgang **garantiert {round(net_profit, 2)} €** reinen Profit.")
+        
+        cashout_profit = h_cashout - h_orig_stake
+        
+        if cashout_profit >= net_profit:
+            st.success(f"✅ **CASHOUT ANNEHMEN!** Dein Buchmacher bietet dir {round(cashout_profit, 2)} € Profit. Das ist besser als manuelles Absichern.")
+        else:
+            st.error(f"❌ **CASHOUT IGNORIEREN!** Der Buchmacher klaut dir {round(net_profit - cashout_profit, 2)} € Profit. Sichere die Wette besser manuell über die Gegenquote ab!")
+
+
+    st.markdown("---")
     with st.expander("➕ Andere Märkte checken & ins Journal eintragen"):
         c_m1, c_m2 = st.columns(2)
         market_options = {"Heim (1)": probs["1"], "Unentschieden (X)": probs["X"], "Auswärts (2)": probs["2"], "Über 2.5": probs["Over25"], "BTTS (Ja)": probs["BTTS"]}
@@ -272,89 +290,37 @@ with tab_engine:
         
         custom_prob = market_options[selected_market]
         custom_ev = calculate_ev(custom_prob, custom_odd)
+        
         raw_k = current_bankroll * calculate_kelly(custom_prob, custom_odd, fraction=(kelly_fraction / parallel_bets))
         max_allowed = current_bankroll * (max_risk_pct / 100.0)
         custom_bet = max_allowed if raw_k > max_allowed else raw_k
         if custom_bet < min_bet: custom_bet = 0
         
-        if custom_ev > 0: st.success(f"✅ Value: **+{round(custom_ev * 100, 2)}%** | Einsatz: **{round(custom_bet, 2)} €**")
-        else: st.error(f"❌ Kein Value ({round(custom_ev * 100, 2)}%).")
+        if custom_ev > 0:
+            st.success(f"✅ Value auf {selected_market}: **+{round(custom_ev * 100, 2)}%** | Einsatz: **{round(custom_bet, 2)} €**")
+        else:
+            st.error(f"❌ Kein Value auf {selected_market} ({round(custom_ev * 100, 2)}%).")
 
         c_j1, c_j2 = st.columns(2)
         with c_j1: league_name = st.text_input("Liga (z.B. Bundesliga)")
         with c_j2: match_name = st.text_input("Spiel (z.B. Bayern - BVB)")
-        if st.button("💾 Wette in SQL-Datenbank speichern"):
+        
+        if st.button("💾 Wette speichern (Cloud)"):
             if custom_ev > 0 and custom_bet > 0:
-                st.session_state.journal.append({"Liga": league_name, "Spiel": match_name, "Tipp": selected_market, "Quote": custom_odd, "Closing Quote": custom_odd, "Einsatz": round(custom_bet, 2), "EV (%)": round(custom_ev * 100, 2), "Status": "Offen"})
+                st.session_state.journal.append({
+                    "Liga": league_name if league_name else "Unbekannt",
+                    "Spiel": match_name if match_name else "Unbekannt", 
+                    "Tipp": selected_market, 
+                    "Quote": custom_odd, 
+                    "Closing Quote": custom_odd,
+                    "Einsatz": round(custom_bet, 2), 
+                    "EV (%)": round(custom_ev * 100, 2), 
+                    "Status": "Offen"
+                })
                 save_journal(st.session_state.journal)
                 st.rerun()
 
-# --- TAB 2: BULK SCANNER ---
-with tab_bulk:
-    st.header("📂 Bulk-Scanner (Rohdaten-Upload)")
-    st.write("Lade hier die CSV-Dateien von FootyStats oder Football-Data.co.uk hoch.")
-    
-    uploaded_file = st.file_uploader("Lade deine Roh-CSV hoch", type=['csv'])
-    
-    if uploaded_file is not None:
-        try:
-            df_raw = pd.read_csv(uploaded_file)
-            df_upload, detected_cols = map_raw_columns(df_raw)
-            
-            st.success(f"✅ Parser hat die Datei gelesen ({len(df_raw)} Spiele).")
-            
-            if 'Odds_1' not in df_upload.columns or 'Odds_X' not in df_upload.columns or 'Odds_2' not in df_upload.columns:
-                st.error("❌ Fehler: Der Parser konnte die Buchmacher-Quoten in der Datei nicht finden (Odds_1, Odds_X, Odds_2 fehlen).")
-            elif 'Home_xG' not in df_upload.columns and 'Home_Scored' not in df_upload.columns:
-                st.error("❌ Fehler: Weder xG-Daten noch Tor-Schnitte gefunden.")
-            else:
-                st.write("⚙️ Scanne den Markt nach Ineffizienzen...")
-                results = []
-                eff_kelly = kelly_fraction / parallel_bets
-                max_allowed = current_bankroll * (max_risk_pct / 100.0)
-
-                for index, row in df_upload.iterrows():
-                    try:
-                        home_team = str(row.get('HomeTeam', f'Heim {index}'))
-                        away_team = str(row.get('AwayTeam', f'Auswärts {index}'))
-                        o1, ox, o2 = float(row.get('Odds_1', 0)), float(row.get('Odds_X', 0)), float(row.get('Odds_2', 0))
-                        
-                        if pd.isna(o1) or pd.isna(ox) or pd.isna(o2) or o1 <= 1 or ox <= 1 or o2 <= 1: continue
-                        
-                        if 'Home_xG' in df_upload.columns and 'Away_xG' in df_upload.columns:
-                            xgh, xga = float(row['Home_xG']), float(row['Away_xG'])
-                        elif 'Home_Scored' in df_upload.columns and 'Home_Conceded' in df_upload.columns:
-                            l_avg = float(row.get('League_Avg', 2.5)) / 2.0
-                            hs, hc = float(row['Home_Scored']), float(row['Home_Conceded'])
-                            As, ac = float(row['Away_Scored']), float(row['Away_Conceded'])
-                            xgh = (hs * ac) / l_avg if l_avg > 0 else 0
-                            xga = (As * hc) / l_avg if l_avg > 0 else 0
-                        else: continue
-
-                        if pd.isna(xgh) or pd.isna(xga): continue
-
-                        probs = calculate_match_probabilities(xgh, xga, rho, zip_factor)
-                        
-                        for prob, odd, label in [(probs['1'], o1, '1'), (probs['X'], ox, 'X'), (probs['2'], o2, '2')]:
-                            ev = calculate_ev(prob, odd)
-                            if ev > 0.02: 
-                                raw_bet = current_bankroll * calculate_kelly(prob, odd, fraction=eff_kelly)
-                                bet_size = max_allowed if raw_bet > max_allowed else raw_bet
-                                if bet_size >= min_bet:
-                                    results.append({"Spiel": f"{home_team} - {away_team}", "Tipp": label, "Quote": odd, "EV (%)": round(ev * 100, 2), "Einsatz (€)": round(bet_size, 2)})
-                    except: pass 
-
-                if results:
-                    st.balloons()
-                    df_res = pd.DataFrame(results).sort_values(by="EV (%)", ascending=False)
-                    st.write(f"🔥 **Jackpot! Wir haben {len(df_res)} profitable Wetten gefunden:**")
-                    st.dataframe(df_res, hide_index=True, use_container_width=True)
-                else:
-                    st.warning("Keine Wetten mit positivem Value (>2% EV) gefunden.")
-        except Exception as e:
-            st.error(f"Fehler: {e}")
-
-# --- TAB 3 & 4: JOURNAL & HANDBUCH ---
+# --- TAB 2 & 3: JOURNAL & HANDBUCH ---
 with tab_journal:
     kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
     kpi1.metric("Start-Kapital", f"{start_bankroll:.2f} €")
@@ -373,12 +339,72 @@ with tab_journal:
     kpi5.metric("Ø CLV", f"{avg_clv:+.2f} %")
 
     st.markdown("---")
-    st.subheader("📋 Historie (Gesichert in Supabase SQL)")
+    st.subheader("🔮 Monte Carlo Stresstest")
+    if len(settled_bets) >= 5:
+        profits = []
+        for b in settled_bets:
+            if b['Status'] == 'Gewonnen': profits.append(b['Einsatz'] * b['Quote'] - b['Einsatz'])
+            else: profits.append(-b['Einsatz'])
+        
+        simulations, ruin_count = [], 0
+        for _ in range(50):
+            path = [current_bankroll]
+            is_ruined = False
+            for _ in range(100):
+                next_bankroll = path[-1] + random.choice(profits)
+                if next_bankroll <= 0: next_bankroll, is_ruined = 0, True
+                path.append(next_bankroll)
+            if is_ruined: ruin_count += 1
+            simulations.append(path)
+            
+        df_sim = pd.DataFrame(simulations).T
+        ror, median_end = (ruin_count / 50) * 100, df_sim.iloc[-1].median()
+        
+        c_mc1, c_mc2, c_mc3 = st.columns(3)
+        c_mc1.metric("Risk of Ruin (Pleite-Risiko)", f"{ror:.1f} %", delta="Ziel: < 5%", delta_color="inverse")
+        c_mc2.metric("Erwartete Bankroll (Median)", f"{median_end:.2f} €")
+        c_mc3.metric("Best Case", f"{df_sim.iloc[-1].max():.2f} €")
+        st.line_chart(df_sim, height=250)
+    else:
+        st.info("⚠️ Du brauchst 5 abgerechnete Wetten im Journal für die Monte-Carlo Simulation.")
+
+    st.markdown("---")
+    st.subheader("🔍 Analyse")
+    if len(settled_bets) > 0:
+        df_settled = pd.DataFrame(settled_bets)
+        col_m1, col_m2 = st.columns(2)
+        
+        with col_m1:
+            market_stats = []
+            for market in df_settled['Tipp'].unique():
+                m_bets = df_settled[df_settled['Tipp'] == market]
+                count, invested = len(m_bets), m_bets['Einsatz'].sum()
+                returned = m_bets.apply(lambda r: r['Einsatz'] * r['Quote'] if r['Status'] == 'Gewonnen' else 0, axis=1).sum()
+                profit, m_roi = returned - invested, (returned - invested) / invested * 100 if invested > 0 else 0
+                market_stats.append({"Markt": market, "Wetten": count, "Profit": round(profit, 2), "ROI (%)": round(m_roi, 1)})
+            st.dataframe(pd.DataFrame(market_stats).sort_values(by="Profit", ascending=False), hide_index=True, use_container_width=True)
+            
+        with col_m2:
+            league_stats = []
+            for league in df_settled['Liga'].unique():
+                l_bets = df_settled[df_settled['Liga'] == league]
+                count, invested = len(l_bets), l_bets['Einsatz'].sum()
+                returned = l_bets.apply(lambda r: r['Einsatz'] * r['Quote'] if r['Status'] == 'Gewonnen' else 0, axis=1).sum()
+                profit, l_roi = returned - invested, (returned - invested) / invested * 100 if invested > 0 else 0
+                league_stats.append({"Liga": league, "Wetten": count, "Profit": round(profit, 2), "ROI (%)": round(l_roi, 1)})
+            st.dataframe(pd.DataFrame(league_stats).sort_values(by="Profit", ascending=False), hide_index=True, use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("📋 Historie & CLV-Eingabe")
     if len(st.session_state.journal) > 0:
         edited_journal = st.data_editor(
             st.session_state.journal, 
-            column_config={"Status": st.column_config.SelectboxColumn("Status", options=["Offen", "Gewonnen", "Verloren"], required=True), "Closing Quote": st.column_config.NumberColumn("Closing Quote", format="%.2f", step=0.01)}, 
-            hide_index=True, use_container_width=True
+            column_config={
+                "Status": st.column_config.SelectboxColumn("Status", options=["Offen", "Gewonnen", "Verloren"], required=True),
+                "Closing Quote": st.column_config.NumberColumn("Closing Quote", format="%.2f", step=0.01)
+            }, 
+            hide_index=True, 
+            use_container_width=True
         )
         if edited_journal != st.session_state.journal:
             st.session_state.journal = edited_journal
@@ -397,10 +423,10 @@ with tab_journal:
 
 with tab_manual:
     st.header("📚 Das Syndikat-Playbook")
-    with st.expander("✅ System-Status: Enterprise"):
+    with st.expander("🛡️ Hedging vs. Cashout (Der Live-Rechner)"):
         st.markdown("""
-        Deine App läuft jetzt auf einer **Supabase PostgreSQL Datenbank**. Das bedeutet:
-        * Keine Speicherlimits mehr.
-        * Maximale Sicherheit.
-        * Du kannst 10.000 Wetten tracken, ohne dass die App langsamer wird.
+        **Nimm niemals blind den Cashout!**
+        Wenn du eine Wette gewinnst und zitterst, kannst du bei einem anderen Buchmacher auf das exakte Gegenteil wetten (Hedging). 
+        * **Beispiel:** Du hast Heim (1) gewettet. Du wettest jetzt live auf X2.
+        Der Rechner zeigt dir exakt, wie viel Geld du setzen musst, um dir einen garantierten Gewinn (egal wer das Spiel gewinnt) zu sichern, und ob das Angebot des Buchmachers schlechter ist als deine eigene Absicherung.
         """)
